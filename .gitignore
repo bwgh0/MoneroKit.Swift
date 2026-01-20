@@ -28,7 +28,10 @@ Pods/
 GeneratedMocks.swift
 
 # SPM
-
 Package.resolved
 .swiftpm
 .build/
+
+# Local dev notes (contain server IPs, test credentials)
+LIGHT_WALLET_TODO.md
+*.todo.md
