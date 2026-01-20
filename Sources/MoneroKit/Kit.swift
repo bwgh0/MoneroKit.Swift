@@ -204,6 +204,21 @@ public class Kit {
     public func estimateFee(address: String, amount: SendAmount, priority: SendPriority = .default) throws -> UInt64 {
         try moneroCore.estimateFee(address: address, amount: amount, priority: priority)
     }
+
+    /// Create a new subaddress
+    /// - Parameter label: Optional label for the subaddress
+    /// - Returns: The newly created SubAddress, or nil if creation failed
+    public func createSubaddress(label: String = "") -> SubAddress? {
+        guard let result = moneroCore.addSubaddress(label: label) else {
+            return nil
+        }
+
+        let newSubAddress = SubAddress(address: result.address, index: result.index)
+        storage.add(subAddress: newSubAddress)
+        delegate?.subAddressesUpdated(subaddresses: storage.getAllAddresses())
+
+        return newSubAddress
+    }
 }
 
 extension Kit: MoneroCoreDelegate {
