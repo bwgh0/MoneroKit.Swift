@@ -830,13 +830,10 @@ class MoneroCore {
     }
 
     struct Balance: Equatable {
-        let all: Int
-        let unlocked: Int
-
-        init(all: UInt64, unlocked: UInt64) {
-            self.all = Int(all)
-            self.unlocked = Int(unlocked)
-        }
+        // CRITICAL: Use UInt64 to prevent integer overflow on 32-bit systems
+        // or for very large balances (> 2^63 piconero = ~9.2 million XMR)
+        let all: UInt64
+        let unlocked: UInt64
 
         static func == (lhs: Balance, rhs: Balance) -> Bool {
             lhs.all == rhs.all && lhs.unlocked == rhs.unlocked
