@@ -3,12 +3,15 @@ import GRDB
 
 class Balance: Record {
     var id: String = "single-row-id"
-    var all: Int
-    var unlocked: Int
+    // CRITICAL: Use Int64 to match GRDB storage and prevent overflow
+    // UInt64 max balance exceeds Monero's total supply, but Int64 handles all practical values
+    var all: Int64
+    var unlocked: Int64
 
-    init(all: Int, unlocked: Int) {
-        self.all = all
-        self.unlocked = unlocked
+    init(all: UInt64, unlocked: UInt64) {
+        // Safe conversion: Monero total supply (~18M XMR = 1.8e19 piconero) fits in Int64
+        self.all = Int64(clamping: all)
+        self.unlocked = Int64(clamping: unlocked)
 
         super.init()
     }
@@ -25,8 +28,8 @@ class Balance: Record {
 
     required init(row: Row) throws {
         id = row[Columns.id]
-        all = row[Columns.all]
-        unlocked = row[Columns.unlocked]
+        all = row[Columns.all] as Int64
+        unlocked = row[Columns.unlocked] as Int64
 
         try super.init(row: row)
     }

@@ -45,15 +45,16 @@ public struct TransactionInfo {
 }
 
 public struct BalanceInfo: Equatable {
-    public let all: Int
-    public let unlocked: Int
+    // CRITICAL: Use Int64 to prevent overflow on large balances
+    public let all: Int64
+    public let unlocked: Int64
 
     init(balance: Balance) {
         all = balance.all
         unlocked = balance.unlocked
     }
 
-    public init(all: Int, unlocked: Int) {
+    public init(all: Int64, unlocked: Int64) {
         self.all = all
         self.unlocked = unlocked
     }
