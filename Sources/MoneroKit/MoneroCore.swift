@@ -460,6 +460,19 @@ class MoneroCore {
         storeWallet(walletPointer: walletPtr)
     }
 
+    /// Restart sync state manager to check for new blocks
+    /// Call this after pull-to-refresh or background wake to detect new blockchain activity
+    func startSync() {
+        // Only restart if wallet is open
+        guard let walletPtr = walletPointer else { return }
+
+        // Kick off wallet2's background refresh to actually download new blocks
+        MONERO_Wallet_startRefresh(walletPtr)
+
+        // Restart the state manager to poll sync progress
+        startStateManager()
+    }
+
     func setConnectingState(waiting: Bool) {
         stateManager.state = .connecting(waiting: waiting)
     }
