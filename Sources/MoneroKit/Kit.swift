@@ -197,6 +197,12 @@ public class Kit {
         lifecycleQueue.async { [weak self] in self?._restart() }
     }
 
+    /// Restart sync state checking to detect new blocks
+    /// Call this after a period of inactivity to check for new blockchain activity
+    public func startSync() {
+        moneroCore.startSync()
+    }
+
     public func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws {
         try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo)
     }
