@@ -42,17 +42,25 @@ public class Kit {
 
         moneroCore.delegate = self
 
-        if storage.getAllAddresses().isEmpty {
-            let primaryAddress = try MoneroCore.address(wallet: wallet, account: account, index: 0, networkType: networkType)
-            storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
+        let existingAddresses = storage.getAllAddresses()
+        if existingAddresses.isEmpty {
+            // Try static address derivation - works for BIP39 and legacy, but NOT polyseed
+            // For polyseed, addresses will be populated after wallet opens via start()
+            do {
+                let primaryAddress = try MoneroCore.address(wallet: wallet, account: account, index: 0, networkType: networkType)
+                storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
 
-            if account == 0 {
-                if case .watch = wallet {
-                    return
+                if account == 0 {
+                    if case .watch = wallet {
+                        return
+                    }
+
+                    let firstSubAddress = try MoneroCore.address(wallet: wallet, account: account, index: 1, networkType: networkType)
+                    storage.add(subAddress: SubAddress(address: firstSubAddress, index: 1))
                 }
-
-                let firstSubAddress = try MoneroCore.address(wallet: wallet, account: account, index: 1, networkType: networkType)
-                storage.add(subAddress: SubAddress(address: firstSubAddress, index: 1))
+            } catch {
+                // Static address derivation failed (likely polyseed)
+                // Addresses will be populated when wallet opens via start()
             }
         }
     }
@@ -145,6 +153,31 @@ public class Kit {
         if kitState == .running {
             moneroCore.setConnectingState(waiting: false)
             moneroCore.start()
+
+            // For polyseed wallets, storage may be empty because static address derivation fails
+            // Populate addresses now that wallet is open and walletPointer is set
+            let currentAddresses = storage.getAllAddresses()
+
+            // Ensure primary address (index 0) exists - may be missing for polyseed
+            let hasIndex0 = currentAddresses.contains { $0.index == 0 && !$0.address.isEmpty }
+            if !hasIndex0 {
+                let primaryAddress = moneroCore.address(index: 0)
+                if !primaryAddress.isEmpty {
+                    storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
+
+                    // Also ensure first subaddress for account 0
+                    let hasIndex1 = currentAddresses.contains { $0.index == 1 && !$0.address.isEmpty }
+                    if !hasIndex1 {
+                        let firstSubAddress = moneroCore.address(index: 1)
+                        if !firstSubAddress.isEmpty {
+                            storage.add(subAddress: SubAddress(address: firstSubAddress, index: 1))
+                        }
+                    }
+
+                    // Notify delegate that addresses are now available
+                    delegate?.subAddressesUpdated(subaddresses: storage.getAllAddresses())
+                }
+            }
         }
     }
 
@@ -329,6 +362,12 @@ public extension Kit {
 
     static func key(wallet: MoneroWallet, privateKey: Bool, spendKey: Bool) throws -> String? {
         try MoneroCore.key(wallet: wallet, privateKey: privateKey, spendKey: spendKey)
+    }
+
+    /// Derive address from wallet credentials without initializing Kit
+    /// This is synchronous and works offline - pure cryptographic derivation
+    static func address(wallet: MoneroWallet, account: UInt32 = 0, index: UInt32 = 0, networkType: NetworkType = .mainnet) throws -> String {
+        try MoneroCore.address(wallet: wallet, account: account, index: index, networkType: networkType)
     }
 }
 
