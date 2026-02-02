@@ -80,6 +80,19 @@ public class Kit {
         return walletHeight ?? 0
     }
 
+    /// Current block heights: (walletHeight, daemonHeight)
+    /// Returns nil if heights are not yet available (still connecting)
+    public var blockHeights: (walletHeight: UInt64, daemonHeight: UInt64)? {
+        if let heights = moneroCore.blockHeights {
+            return (walletHeight: heights.0, daemonHeight: heights.1)
+        }
+        // Fallback to storage if runtime heights not available
+        if let stored = storage.getBlockHeights() {
+            return (walletHeight: UInt64(stored.walletHeight), daemonHeight: UInt64(stored.daemonHeight))
+        }
+        return nil
+    }
+
     public var walletState: WalletState {
         moneroCore.state
     }
@@ -216,12 +229,7 @@ public class Kit {
 
         switch moneroCore.state {
         case .connecting, .syncing, .synced: moneroCore.refresh()
-        case .notSynced:
-            // Don't restart for light wallets - they don't need traditional sync
-            // and restarting would destroy the walletPointer needed for fee estimation/sending
-            if !moneroCore.node.isLightWallet {
-                restart()
-            }
+        case .notSynced: restart()
         case .idle: ()
         }
     }
