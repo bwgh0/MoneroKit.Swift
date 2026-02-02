@@ -13,9 +13,10 @@ class SyncStateManager {
     private var isRunning = false
     private var walletPointer: UnsafeMutableRawPointer?
     private var cWalletPassword: UnsafeMutablePointer<CChar>?
-    private var isLightWallet: Bool = false
 
-    private let queue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_state_queue", qos: .userInitiated)
+    let queue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_state_queue", qos: .userInitiated)
+    private var timer: DispatchSourceTimer?
+    private let timerLock = NSLock()
 
     private var connectStartTime: Date?
     private var backgroundSyncSetupSuccess: Bool = false
@@ -46,11 +47,10 @@ class SyncStateManager {
         return lastStoredBlockHeight <= walletHeight && walletHeight - lastStoredBlockHeight >= Self.storeBlocksCount
     }
 
-    init(logger: Logger?, restoreHeight: UInt64, reachabilityManager: ReachabilityManager, isLightWallet: Bool = false) {
+    init(logger: Logger?, restoreHeight: UInt64, reachabilityManager: ReachabilityManager) {
         self.logger = logger
         self.reachabilityManager = reachabilityManager
         self.restoreHeight = restoreHeight
-        self.isLightWallet = isLightWallet
 
         reachabilityManager.$isReachable
             .receive(on: queue)
@@ -61,13 +61,6 @@ class SyncStateManager {
     }
 
     private func evaluateState() -> WalletState {
-        // Light wallet mode: LWS handles blockchain scanning server-side
-        // The wallet is "synced" immediately - no need to check reachability
-        // since we're using REST API, not daemon RPC
-        if isLightWallet {
-            return .synced
-        }
-
         guard reachabilityManager.isReachable else {
             return .idle(daemonReachable: false)
         }
@@ -95,7 +88,12 @@ class SyncStateManager {
     }
 
     private func checkSyncState() {
-        guard let walletPtr = walletPointer else { return }
+        timerLock.lock()
+        guard isRunning, let walletPtr = walletPointer else {
+            timerLock.unlock()
+            return
+        }
+        timerLock.unlock()
 
         walletHeight = MONERO_Wallet_blockChainHeight(walletPtr)
         isSynchronized = MONERO_Wallet_synchronized(walletPtr)
@@ -104,17 +102,9 @@ class SyncStateManager {
         if status != 0 {
             let errorCStr = MONERO_Wallet_errorString(walletPtr)
             let errorStr = stringFromCString(errorCStr) ?? "Unknown wallet error"
-
-            // For light wallets, ignore ALL status errors - LWS uses REST API, not daemon RPC
-            // wallet2 may report errors that don't apply in light wallet mode
-            if isLightWallet {
-                NSLog("[SyncStateManager] Light wallet mode - ignoring wallet status error: \(errorStr)")
-                // Continue with evaluation - light wallets are always "synced"
-            } else {
-                logger?.error("Wallet is in error state (\(status)): \(errorStr).")
-                state = .notSynced(error: WalletStateError.statusError(errorStr))
-                return
-            }
+            logger?.error("Wallet is in error state (\(status)): \(errorStr).")
+            state = .notSynced(error: WalletStateError.statusError(errorStr))
+            return
         }
 
         if lastStoredBlockHeight < restoreHeight {
@@ -129,11 +119,21 @@ class SyncStateManager {
     }
 
     private func scheduleNextCheck() {
+        timerLock.lock()
+        defer { timerLock.unlock() }
+
         guard isRunning else { return }
 
-        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+        timer?.cancel()
+        timer = nil
+
+        let newTimer = DispatchSource.makeTimerSource(queue: queue)
+        newTimer.schedule(deadline: .now() + 2)
+        newTimer.setEventHandler { [weak self] in
             self?.checkSyncState()
         }
+        timer = newTimer
+        newTimer.resume()
     }
 
     func validateReachable() {
@@ -175,7 +175,11 @@ class SyncStateManager {
     }
 
     func stop() {
+        timerLock.lock()
         isRunning = false
+        timer?.cancel()
+        timer = nil
+        timerLock.unlock()
 
 //        if let walletPtr = walletPointer {
 //            let stopped = MONERO_Wallet_stopBackgroundSync(walletPtr, cWalletPassword)
@@ -194,6 +198,7 @@ class SyncStateManager {
 
         walletPointer = nil
         cWalletPassword = nil
+        onSyncStateChanged = nil  // Clear callback to prevent use-after-free
     }
 
     func walletStored() {

@@ -6,21 +6,28 @@ class WalletListener {
     private var walletPointer: UnsafeMutableRawPointer?
     private var isRunning = false
     private var lockedBalanceBlockHeight: UInt64?
-    private let queue = DispatchQueue(label: "monero.kit.wallet-listener-queue", qos: .userInitiated)
+    private let listenerQueue = DispatchQueue(label: "monero.kit.wallet-listener-queue", qos: .userInitiated)
+    private var timer: DispatchSourceTimer?
+    private let timerLock = NSLock()
     var onNewTransaction: (() -> Void)?
 
     private func checkListener() {
-        guard let walletListenerPointer else { return }
+        timerLock.lock()
+        guard isRunning, let listenerPtr = walletListenerPointer else {
+            timerLock.unlock()
+            return
+        }
+        timerLock.unlock()
 
-        let hasNewTransaction = MONERO_cw_WalletListener_isNewTransactionExist(walletListenerPointer)
+        let hasNewTransaction = MONERO_cw_WalletListener_isNewTransactionExist(listenerPtr)
         if hasNewTransaction {
             // Has new transaction
             onNewTransaction?()
-            MONERO_cw_WalletListener_resetIsNewTransactionExist(walletListenerPointer)
+            MONERO_cw_WalletListener_resetIsNewTransactionExist(listenerPtr)
         }
 
         if let height = lockedBalanceBlockHeight {
-            let newHeight = MONERO_cw_WalletListener_height(walletListenerPointer)
+            let newHeight = MONERO_cw_WalletListener_height(listenerPtr)
             if newHeight > height, newHeight - height >= Kit.confirmationsThreshold {
                 // Previously confirmed transaction has enough confirmations for the locked balance to be updated.
                 onNewTransaction?()
@@ -32,11 +39,21 @@ class WalletListener {
     }
 
     private func scheduleNextCheck() {
+        timerLock.lock()
+        defer { timerLock.unlock() }
+
         guard isRunning else { return }
 
-        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+        timer?.cancel()
+        timer = nil
+
+        let newTimer = DispatchSource.makeTimerSource(queue: listenerQueue)
+        newTimer.schedule(deadline: .now() + 1)
+        newTimer.setEventHandler { [weak self] in
             self?.checkListener()
         }
+        timer = newTimer
+        newTimer.resume()
     }
 
     func start(walletPointer: UnsafeMutableRawPointer?) {
@@ -52,7 +69,12 @@ class WalletListener {
     }
 
     func stop() {
+        timerLock.lock()
         isRunning = false
+        timer?.cancel()
+        timer = nil
+        timerLock.unlock()
+
         onNewTransaction = nil
         walletListenerPointer = nil
 
