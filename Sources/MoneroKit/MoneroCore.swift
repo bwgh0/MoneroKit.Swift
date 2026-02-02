@@ -59,7 +59,7 @@ class MoneroCore {
         stateManager.blockHeights
     }
 
-    /// Internal accessor for wallet pointer (used by LightWalletCore)
+    /// Internal accessor for wallet pointer
     func getWalletPointer() -> UnsafeMutableRawPointer? {
         return walletPointer
     }
@@ -74,7 +74,7 @@ class MoneroCore {
         self.networkType = networkType
         self.logger = logger
         self.moneroCoreLogLevel = moneroCoreLogLevel
-        stateManager = SyncStateManager(logger: logger, restoreHeight: restoreHeight, reachabilityManager: reachabilityManager, isLightWallet: node.isLightWallet)
+        stateManager = SyncStateManager(logger: logger, restoreHeight: restoreHeight, reachabilityManager: reachabilityManager)
         walletListener = WalletListener()
         walletManagerPointer = MONERO_WalletManagerFactory_getWalletManager()
 
@@ -186,8 +186,8 @@ class MoneroCore {
         let cDaemonLogin = strdup(((node.login ?? "") as NSString).utf8String)
         let cDaemonPassword = strdup(((node.password ?? "") as NSString).utf8String)
         let useSSL = node.url.scheme?.lowercased() == "https"
-        NSLog("[MoneroCore] Initializing wallet with daemon: \(node.url.absoluteString), useSSL=\(useSSL), lightWallet=\(node.isLightWallet)")
-        let initSuccess = MONERO_Wallet_init(walletPtr, cDaemonAddress, 0, cDaemonLogin, cDaemonPassword, useSSL, node.isLightWallet, "")
+        NSLog("[MoneroCore] Initializing wallet with daemon: \(node.url.absoluteString), useSSL=\(useSSL)")
+        let initSuccess = MONERO_Wallet_init(walletPtr, cDaemonAddress, 0, cDaemonLogin, cDaemonPassword, useSSL, false, "")
         guard initSuccess else {
             let errorCStr = MONERO_Wallet_errorString(walletPtr)
             let msg = stringFromCString(errorCStr) ?? "Unknown daemon init error"
@@ -197,71 +197,7 @@ class MoneroCore {
         }
         NSLog("[MoneroCore] Wallet initialized successfully with daemon, self=\(Unmanaged.passUnretained(self).toOpaque())")
 
-        // Light wallet servers are always trusted by design
-        MONERO_Wallet_setTrustedDaemon(walletPtr, node.isLightWallet || node.isTrusted)
-
-        // For light wallet mode, call lightWalletLogin to authenticate with the LWS
-        // This is REQUIRED for wallet2 to fetch outputs via /get_unspent_outs
-        print("[MoneroCore] DEBUG: node.isLightWallet = \(node.isLightWallet)")
-        if node.isLightWallet {
-            print("[MoneroCore] DEBUG: Attempting light wallet login...")
-            var isNewWallet: Bool = false
-            let loginSuccess = MONERO_Wallet_lightWalletLogin(walletPtr, &isNewWallet)
-            print("[MoneroCore] DEBUG: loginSuccess = \(loginSuccess)")
-            if loginSuccess {
-                NSLog("[MoneroCore] Light wallet login successful, isNewWallet=\(isNewWallet)")
-                print("[MoneroCore] Light wallet login successful, isNewWallet=\(isNewWallet)")
-
-                // CRITICAL FIX: Start background refresh to fetch outputs from LWS
-                // lightWalletLogin() only authenticates - it does NOT fetch outputs
-                // Note: synchronous refresh() doesn't work in light wallet mode,
-                // but startRefresh() (background thread) does call /get_unspent_outs
-                NSLog("[MoneroCore] Starting background refresh to fetch outputs from LWS...")
-                print("[MoneroCore] Starting background refresh...")
-                MONERO_Wallet_startRefresh(walletPtr)
-                NSLog("[MoneroCore] Initialization loop skipped (FIX APPLIED)")
-                print("[MoneroCore] startRefresh called")
-
-                // Poll for wallet to become synchronized and balance to appear (max 15 seconds)
-                // DEADLOCK FIX: Don't block initialization waiting for balance.
-                // Let the background refresh finish asynchronously and update via delegates.
-                /*
-                var attempts = 0
-                let maxAttempts = 30  // 30 * 0.5s = 15 seconds
-                while attempts < maxAttempts {
-                    Thread.sleep(forTimeInterval: 0.5)
-                    attempts += 1
-
-                    let isSynced = MONERO_Wallet_synchronized(walletPtr)
-                    let status = MONERO_Wallet_status(walletPtr)
-                    let balance = MONERO_Wallet_balance(walletPtr, account)
-                    let walletHeight = MONERO_Wallet_blockChainHeight(walletPtr)
-                    let daemonHeight = MONERO_Wallet_daemonBlockChainHeight(walletPtr)
-
-                    if attempts % 4 == 0 || balance > 0 {  // Log every 2 seconds or when balance found
-                        NSLog("[MoneroCore] LWS poll \(attempts): synced=\(isSynced), status=\(status), balance=\(balance), walletH=\(walletHeight), daemonH=\(daemonHeight)")
-                    }
-
-                    if balance > 0 {
-                        let unlocked = MONERO_Wallet_unlockedBalance(walletPtr, account)
-                        NSLog("[MoneroCore] Light wallet outputs fetched after \(attempts * 500)ms, balance=\(balance), unlocked=\(unlocked)")
-                        break
-                    }
-
-                    if attempts == maxAttempts {
-                        let errorCStr = MONERO_Wallet_errorString(walletPtr)
-                        let errMsg = stringFromCString(errorCStr) ?? "none"
-                        NSLog("[MoneroCore] Light wallet balance still 0 after \(maxAttempts * 500)ms, error=\(errMsg)")
-                    }
-                }
-                */
-            } else {
-                let errorCStr = MONERO_Wallet_errorString(walletPtr)
-                let msg = stringFromCString(errorCStr) ?? "Unknown light wallet login error"
-                NSLog("[MoneroCore] WARNING: Light wallet login failed: \(msg)")
-                // Continue anyway - the wallet might still work for some operations
-            }
-        }
+        MONERO_Wallet_setTrustedDaemon(walletPtr, node.isTrusted)
 
         walletPointer = recoveredWalletPtr
         wallet.clear()
@@ -273,6 +209,9 @@ class MoneroCore {
     }
 
     private func onSyncStateChanged() {
+        // Early exit if wallet is already closed to prevent use-after-free
+        guard walletPointer != nil else { return }
+
         globalEventQueue.async { [weak self] in
             guard let self else { return }
             delegate?.walletStateDidChange(state: state)
@@ -304,7 +243,7 @@ class MoneroCore {
     private func updateBalance(walletPointer: UnsafeMutableRawPointer) {
         let allBalance = MONERO_Wallet_balance(walletPointer, account)
         let unlocked = MONERO_Wallet_unlockedBalance(walletPointer, account)
-        NSLog("[MoneroCore] updateBalance: all=\(allBalance), unlocked=\(unlocked), isLightWallet=\(node.isLightWallet)")
+        NSLog("[MoneroCore] updateBalance: all=\(allBalance), unlocked=\(unlocked)")
         balance = Balance(all: allBalance, unlocked: unlocked)
     }
 
@@ -416,14 +355,7 @@ class MoneroCore {
     private func startWalletServices() {
         guard let walletPointer else { return }
 
-        // Light wallet: immediately synced since LWS handles blockchain scanning server-side
-        // For regular wallets: start in connecting state
-        if node.isLightWallet {
-            NSLog("[MoneroCore] Light wallet mode - setting state to synced immediately")
-            stateManager.state = .synced
-        } else {
-            stateManager.state = .connecting(waiting: false)
-        }
+        stateManager.state = .connecting(waiting: false)
 
         startStateManager()
         walletListener.start(walletPointer: walletPointer)
@@ -431,8 +363,16 @@ class MoneroCore {
 
     private func stopWalletServices() {
         NSLog("[MoneroCore] stopWalletServices() called, self=\(Unmanaged.passUnretained(self).toOpaque())")
-        stateManager.stop()
+
+        // Stop wallet listener first
         walletListener.stop()
+
+        // Stop state manager (this cancels timers and clears callback)
+        stateManager.stop()
+
+        // Give any in-flight operations a chance to complete
+        // by synchronously executing a barrier on the state manager's queue
+        stateManager.queue.sync(flags: .barrier) { }
     }
 
     func start() {
@@ -519,73 +459,6 @@ class MoneroCore {
             throw MoneroCoreError.walletNotInitialized
         }
 
-        // NOTE: LightWalletTransactionBuilder (CMyMoneroCore) is DISABLED because it has
-        // symbol conflicts with MoneroCombined (wallet2). Both libraries define cryptonote::account_base
-        // and other classes with incompatible implementations, causing crashes.
-        //
-        // For now, light wallets use wallet2's LWS support, which has parsing issues ("Invalid hash field")
-        // but doesn't crash. A proper fix requires either:
-        // 1. Building CMyMoneroCore as a separate dynamic library with hidden symbols
-        // 2. Using a server-side transaction construction approach
-        // 3. Pure Swift implementation of the transaction builder
-        //
-        // if node.isLightWallet {
-        //     NSLog("[MoneroCore] send: Using LightWalletTransactionBuilder for light wallet")
-        //     try sendViaLightWalletBuilder(to: address, amount: amount, priority: priority)
-        //     return
-        // }
-
-        // Log wallet2 internal state before attempting transaction
-        let internalBalance = MONERO_Wallet_balance(walletPtr, account)
-        let internalUnlocked = MONERO_Wallet_unlockedBalance(walletPtr, account)
-        NSLog("[MoneroCore] send: INVESTIGATION - wallet2 internal state:")
-        NSLog("[MoneroCore] send:   - isLightWallet: \(node.isLightWallet)")
-        NSLog("[MoneroCore] send:   - balance (piconero): \(internalBalance)")
-        NSLog("[MoneroCore] send:   - unlockedBalance (piconero): \(internalUnlocked)")
-        NSLog("[MoneroCore] send:   - requested amount: \(amount.value)")
-        NSLog("[MoneroCore] send:   - node URL: \(node.url.absoluteString)")
-
-        // If balance is 0 in light mode, this is the core problem - wallet2 hasn't fetched outputs from LWS
-        if node.isLightWallet && internalBalance == 0 {
-            NSLog("[MoneroCore] send: WARNING - Light wallet mode but wallet2 balance is 0!")
-            NSLog("[MoneroCore] send: wallet2 likely hasn't fetched outputs from LWS yet")
-            NSLog("[MoneroCore] send: Attempting to trigger refresh and poll for balance...")
-
-            // Try to trigger a refresh to fetch outputs from LWS
-            // In light wallet mode, refresh should call /get_unspent_outs
-            NSLog("[MoneroCore] send: Calling MONERO_Wallet_startRefresh...")
-            MONERO_Wallet_startRefresh(walletPtr)
-
-            // Poll for balance to become non-zero (max 30 seconds)
-            let maxAttempts = 30
-            var attempt = 0
-            var currentBalance: UInt64 = 0
-
-            while attempt < maxAttempts {
-                Thread.sleep(forTimeInterval: 1.0)
-                attempt += 1
-                currentBalance = MONERO_Wallet_balance(walletPtr, account)
-                let currentUnlocked = MONERO_Wallet_unlockedBalance(walletPtr, account)
-                NSLog("[MoneroCore] send: Refresh poll \(attempt)/\(maxAttempts) - balance: \(currentBalance), unlocked: \(currentUnlocked)")
-
-                if currentBalance > 0 {
-                    NSLog("[MoneroCore] send: Balance found after \(attempt) seconds!")
-                    break
-                }
-
-                // Try triggering refresh again every 5 seconds
-                if attempt % 5 == 0 {
-                    NSLog("[MoneroCore] send: Re-triggering refresh...")
-                    MONERO_Wallet_startRefresh(walletPtr)
-                }
-            }
-
-            if currentBalance == 0 {
-                NSLog("[MoneroCore] send: ERROR - Balance still 0 after \(maxAttempts) seconds of polling")
-                NSLog("[MoneroCore] send: Light wallet may not be fetching outputs from LWS correctly")
-            }
-        }
-
         NSLog("[MoneroCore] send: creating transaction to \(address.prefix(16))..., amount=\(amount.value), priority=\(priority.rawValue)")
         let cAddress = (address as NSString).utf8String
         let pendingTxPtr = MONERO_Wallet_createTransaction(walletPtr, cAddress, "", amount.value, 0, Int32(priority.rawValue), account, "", "")
@@ -614,179 +487,15 @@ class MoneroCore {
             MONERO_Wallet_setUserNote(walletPtr, cTxId, cNote)
         }
 
-        if node.isLightWallet {
-            // For light wallets, extract hex and submit to LWS /submit_raw_tx endpoint
-            let txHexPtr = MONERO_PendingTransaction_hex(txPtr, "")
-            let txHex = stringFromCString(txHexPtr) ?? ""
-
-            if txHex.isEmpty {
-                throw MoneroCoreError.transactionSendFailed("Transaction hex is empty")
-            }
-
-            NSLog("[MoneroCore] send: submitting tx to LWS, hex length=\(txHex.count)")
-
-            // Synchronous HTTP POST to /submit_raw_tx
-            let submitUrl = URL(string: "\(node.url.absoluteString)/submit_raw_tx")!
-            var request = URLRequest(url: submitUrl)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["tx": txHex])
-
-            let semaphore = DispatchSemaphore(value: 0)
-            var submitError: Error?
-
-            URLSession.shared.dataTask(with: request) { data, response, error in
-                defer { semaphore.signal() }
-
-                if let error = error {
-                    submitError = MoneroCoreError.transactionSendFailed(error.localizedDescription)
-                    return
-                }
-
-                guard let data = data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let status = json["status"] as? String else {
-                    submitError = MoneroCoreError.transactionSendFailed("Invalid LWS response")
-                    return
-                }
-
-                if status == "OK" {
-                    NSLog("[MoneroCore] send: transaction submitted to LWS successfully")
-                } else {
-                    let errorMsg = json["error"] as? String ?? "Transaction rejected"
-                    submitError = MoneroCoreError.transactionSendFailed(errorMsg)
-                }
-            }.resume()
-
-            semaphore.wait()
-
-            if let error = submitError {
-                throw error
-            }
-        } else {
-            // For regular wallets, use commit() to broadcast via daemon
-            NSLog("[MoneroCore] send: committing transaction...")
-            guard MONERO_PendingTransaction_commit(txPtr, "", false) else {
-                let error = stringFromCString(MONERO_PendingTransaction_errorString(txPtr)) ?? "Unknown commit error"
-                NSLog("[MoneroCore] send: commit failed, error='\(error)'")
-                throw MoneroCoreError.transactionCommitFailed(error)
-            }
-            NSLog("[MoneroCore] send: transaction committed successfully")
+        NSLog("[MoneroCore] send: committing transaction...")
+        guard MONERO_PendingTransaction_commit(txPtr, "", false) else {
+            let error = stringFromCString(MONERO_PendingTransaction_errorString(txPtr)) ?? "Unknown commit error"
+            NSLog("[MoneroCore] send: commit failed, error='\(error)'")
+            throw MoneroCoreError.transactionCommitFailed(error)
         }
+        NSLog("[MoneroCore] send: transaction committed successfully")
 
         startStateManager()
-    }
-
-    /// Send transaction using LightWalletTransactionBuilder (CMyMoneroCore JSON serial bridge)
-    /// This is used for light wallets instead of wallet2's createTransaction which has parsing issues
-    private func sendViaLightWalletBuilder(to destinationAddress: String, amount: SendAmount, priority: SendPriority) throws {
-        guard let walletPtr = walletPointer else {
-            throw MoneroCoreError.walletNotInitialized
-        }
-
-        // Extract wallet keys from wallet2
-        guard let walletAddress = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0)),
-              let privateViewKey = stringFromCString(MONERO_Wallet_secretViewKey(walletPtr)),
-              let privateSpendKey = stringFromCString(MONERO_Wallet_secretSpendKey(walletPtr)),
-              let publicSpendKey = stringFromCString(MONERO_Wallet_publicSpendKey(walletPtr)) else {
-            NSLog("[MoneroCore] sendViaLightWalletBuilder: Failed to extract wallet keys")
-            throw MoneroCoreError.transactionSendFailed("Failed to extract wallet keys")
-        }
-
-        NSLog("[MoneroCore] sendViaLightWalletBuilder: wallet address: \(walletAddress.prefix(16))...")
-        NSLog("[MoneroCore] sendViaLightWalletBuilder: destination: \(destinationAddress.prefix(16))...")
-        NSLog("[MoneroCore] sendViaLightWalletBuilder: amount: \(amount.value)")
-
-        // Determine network type
-        let netType: LightWalletNetType
-        switch networkType {
-        case .mainnet:
-            netType = .mainnet
-        case .testnet:
-            netType = .testnet
-        }
-
-        // Create the builder
-        let builder = LightWalletTransactionBuilder(
-            serverURL: node.url,
-            address: walletAddress,
-            privateViewKey: privateViewKey,
-            privateSpendKey: privateSpendKey,
-            publicSpendKey: publicSpendKey,
-            netType: netType
-        )
-
-        // Convert priority
-        let lwPriority: LightWalletPriority
-        switch priority {
-        case .low:
-            lwPriority = .low
-        case .default:
-            lwPriority = .medLow
-        case .medium:
-            lwPriority = .medHigh
-        case .high, .last:
-            lwPriority = .high
-        }
-
-        // Use a semaphore to wait for async completion
-        let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<LightWalletTransactionResult, Error>?
-
-        builder.send(
-            toAddress: destinationAddress,
-            amount: amount.value,
-            priority: lwPriority,
-            isSweeping: false,
-            onStatusUpdate: { status in
-                NSLog("[MoneroCore] sendViaLightWalletBuilder: \(status)")
-            },
-            completion: { txResult in
-                result = txResult
-                semaphore.signal()
-            }
-        )
-
-        // Wait for completion (max 2 minutes)
-        let timeout = DispatchTime.now() + .seconds(120)
-        if semaphore.wait(timeout: timeout) == .timedOut {
-            NSLog("[MoneroCore] sendViaLightWalletBuilder: Transaction timed out")
-            throw MoneroCoreError.transactionSendFailed("Transaction creation timed out")
-        }
-
-        // Handle result
-        switch result {
-        case .success(let tx):
-            NSLog("[MoneroCore] sendViaLightWalletBuilder: Transaction created successfully!")
-            NSLog("[MoneroCore] sendViaLightWalletBuilder: txHash: \(tx.txHash)")
-            NSLog("[MoneroCore] sendViaLightWalletBuilder: fee: \(tx.usedFee)")
-            // Transaction is already submitted by LightWalletTransactionBuilder
-            // Trigger a refresh to update balance
-            startStateManager()
-
-        case .failure(let error):
-            NSLog("[MoneroCore] sendViaLightWalletBuilder: Transaction failed: \(error)")
-            if let lwError = error as? LightWalletError {
-                switch lwError {
-                case .insufficientFunds(let spendable, let required):
-                    throw MoneroCoreError.transactionSendFailed("Insufficient funds: have \(spendable), need \(required)")
-                case .transactionCreationFailed(let msg):
-                    throw MoneroCoreError.transactionSendFailed(msg)
-                case .networkError(let msg):
-                    throw MoneroCoreError.transactionSendFailed("Network error: \(msg)")
-                case .serverError(let msg):
-                    throw MoneroCoreError.transactionSendFailed("Server error: \(msg)")
-                default:
-                    throw MoneroCoreError.transactionSendFailed(error.localizedDescription)
-                }
-            } else {
-                throw MoneroCoreError.transactionSendFailed(error.localizedDescription)
-            }
-
-        case .none:
-            NSLog("[MoneroCore] sendViaLightWalletBuilder: No result received")
-            throw MoneroCoreError.transactionSendFailed("No result received from transaction builder")
-        }
     }
 
     func estimateFee(address: String, amount: SendAmount, priority: SendPriority = .default) throws -> UInt64 {
@@ -802,15 +511,6 @@ class MoneroCore {
         let error = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? ""
         NSLog("[MoneroCore] estimateFee: fee=\(fee), error='\(error)'")
         if !error.isEmpty, error != "No error" {
-            // For light wallets, certain errors are expected - they use LWS instead of daemon RPC
-            // If we got a valid fee, return it despite these benign errors
-            if node.isLightWallet && fee > 0 {
-                let lowerError = error.lowercased()
-                if lowerError.contains("no connection") || lowerError.contains("invalid hash field") {
-                    NSLog("[MoneroCore] estimateFee: ignoring benign error for light wallet, returning fee=\(fee)")
-                    return fee
-                }
-            }
             throw MoneroCoreError.match(error) ?? MoneroCoreError.transactionEstimationFailed(error)
         }
         return fee
