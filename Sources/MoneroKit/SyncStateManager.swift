@@ -19,6 +19,8 @@ class SyncStateManager {
     private let timerLock = NSLock()
 
     private var connectStartTime: Date?
+    private var walletReadyTime: Date?  // Set when wallet2 is initialized (walletHeight > 0)
+    private var hasConnectedOnce: Bool = false  // Track if we've established daemon connection
     private var backgroundSyncSetupSuccess: Bool = false
     private var restoreHeight: UInt64
     private var lastStoredBlockHeight: UInt64 = 0
@@ -30,7 +32,7 @@ class SyncStateManager {
 
     var onSyncStateChanged: (() -> Void)?
 
-    var state: WalletState = .notSynced(error: WalletStateError.notStarted) {
+    var state: WalletState = .idle(daemonReachable: false) {
         didSet {
             if oldValue != state {
                 onSyncStateChanged?()
@@ -65,7 +67,9 @@ class SyncStateManager {
             return .idle(daemonReachable: false)
         }
 
-        if daemonHeight == 0, let connectStartTime, Date().timeIntervalSince(connectStartTime) > Self.connectTimeout {
+        // Only check timeout after wallet2 is ready (walletHeight > 0)
+        // This prevents false timeouts during C++ initialization on fresh loads
+        if daemonHeight == 0, let walletReadyTime, Date().timeIntervalSince(walletReadyTime) > Self.connectTimeout {
             return .notSynced(error: .statusError("Connection timed out"))
         }
 
@@ -99,12 +103,24 @@ class SyncStateManager {
         isSynchronized = MONERO_Wallet_synchronized(walletPtr)
         let status = MONERO_Wallet_status(walletPtr)
 
+        // Track when wallet2 is ready (has processed at least one block)
+        // This ensures we don't timeout during C++ initialization
+        if walletHeight > 0 && walletReadyTime == nil {
+            walletReadyTime = Date()
+        }
+
         if status != 0 {
             let errorCStr = MONERO_Wallet_errorString(walletPtr)
             let errorStr = stringFromCString(errorCStr) ?? "Unknown wallet error"
             logger?.error("Wallet is in error state (\(status)): \(errorStr).")
-            state = .notSynced(error: WalletStateError.statusError(errorStr))
-            return
+
+            // Only surface errors to user if we've connected at least once
+            // During initial connection, transient errors are expected
+            if hasConnectedOnce {
+                state = .notSynced(error: WalletStateError.statusError(errorStr))
+                return
+            }
+            // Otherwise, continue checking - let evaluateState handle connecting state
         }
 
         if lastStoredBlockHeight < restoreHeight {
@@ -112,6 +128,11 @@ class SyncStateManager {
         }
 
         daemonHeight = MONERO_Wallet_daemonBlockChainHeight(walletPtr)
+
+        // Track when we first establish daemon connection
+        if daemonHeight > 0 && !hasConnectedOnce {
+            hasConnectedOnce = true
+        }
 
         state = evaluateState()
 
@@ -191,6 +212,8 @@ class SyncStateManager {
 //            }
 //        }
         connectStartTime = nil
+        walletReadyTime = nil
+        hasConnectedOnce = false
 
         if let walletPointer {
             MONERO_Wallet_pauseRefresh(walletPointer)
