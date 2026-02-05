@@ -14,7 +14,8 @@ class SyncStateManager {
     private var walletPointer: UnsafeMutableRawPointer?
     private var cWalletPassword: UnsafeMutablePointer<CChar>?
 
-    let queue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_state_queue", qos: .userInitiated)
+    private static let queueKey = DispatchSpecificKey<Bool>()
+    let queue: DispatchQueue
     private var timer: DispatchSourceTimer?
     private let timerLock = NSLock()
 
@@ -53,6 +54,9 @@ class SyncStateManager {
         self.logger = logger
         self.reachabilityManager = reachabilityManager
         self.restoreHeight = restoreHeight
+
+        self.queue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_state_queue", qos: .userInitiated)
+        queue.setSpecific(key: Self.queueKey, value: true)
 
         reachabilityManager.$isReachable
             .receive(on: queue)
@@ -201,6 +205,13 @@ class SyncStateManager {
         timer?.cancel()
         timer = nil
         timerLock.unlock()
+
+        // Wait for any in-flight checkSyncState() to complete before clearing pointer
+        // This prevents use-after-free when wallet is deallocated
+        // Check if already on queue to avoid deadlock
+        if DispatchQueue.getSpecific(key: Self.queueKey) == nil {
+            queue.sync { }
+        }
 
 //        if let walletPtr = walletPointer {
 //            let stopped = MONERO_Wallet_stopBackgroundSync(walletPtr, cWalletPassword)
