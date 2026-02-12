@@ -272,10 +272,8 @@ extension Kit: MoneroCoreDelegate {
     func walletStateDidChange(state: WalletState) {
         delegate?.walletStateDidChange(state: state)
 
-        // Don't auto-stop on error - let the app handle via delegate
-        // if case .notSynced = state {
-        //     stop()
-        // }
+        // Skip storage update if kit is shutting down
+        guard started else { return }
 
         if let (walletHeight, daemonHeight) = moneroCore.blockHeights {
             storage.update(blockHeights: BlockHeights(daemonHeight: Int(daemonHeight), walletHeight: Int(walletHeight)))
