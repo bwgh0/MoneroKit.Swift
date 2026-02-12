@@ -138,7 +138,7 @@ class GrdbStorage {
     }
 
     func update(blockHeights: BlockHeights) {
-        try! dbPool.write { db in
+        _ = try? dbPool.write { db in
             try BlockHeights.deleteAll(db)
             try blockHeights.insert(db)
         }
