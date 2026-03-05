@@ -185,9 +185,11 @@ class MoneroCore {
         let cDaemonAddress = strdup((node.url.absoluteString as NSString).utf8String)
         let cDaemonLogin = strdup(((node.login ?? "") as NSString).utf8String)
         let cDaemonPassword = strdup(((node.password ?? "") as NSString).utf8String)
+        let cProxy = strdup(((node.proxy ?? "") as NSString).utf8String)
         let useSSL = node.url.scheme?.lowercased() == "https"
-        NSLog("[MoneroCore] Initializing wallet with daemon: \(node.url.absoluteString), useSSL=\(useSSL)")
-        let initSuccess = MONERO_Wallet_init(walletPtr, cDaemonAddress, 0, cDaemonLogin, cDaemonPassword, useSSL, false, "")
+        NSLog("[MoneroCore] Initializing wallet with daemon: \(node.url.absoluteString), useSSL=\(useSSL), proxy=\(node.proxy ?? "none")")
+        let initSuccess = MONERO_Wallet_init(walletPtr, cDaemonAddress, 0, cDaemonLogin, cDaemonPassword, useSSL, false, cProxy)
+        free(cProxy)
         guard initSuccess else {
             let errorCStr = MONERO_Wallet_errorString(walletPtr)
             let msg = stringFromCString(errorCStr) ?? "Unknown daemon init error"
