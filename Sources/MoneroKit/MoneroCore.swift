@@ -434,6 +434,14 @@ class MoneroCore {
         // Add the new subaddress
         MONERO_Wallet_addSubaddress(walletPtr, account, label)
 
+        // Check if the operation caused an error (e.g. thread contention during sync)
+        let status = MONERO_Wallet_status(walletPtr)
+        if status != 0 {
+            let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
+            NSLog("[MoneroCore] addSubaddress failed with status=\(status): \(errorStr)")
+            return nil
+        }
+
         // Get the new count to verify
         let countAfter = MONERO_Wallet_numSubaddresses(walletPtr, account)
 
