@@ -7,7 +7,11 @@ class GrdbStorage {
     init(databaseFilePath: String) {
         dbPool = try! DatabasePool(path: databaseFilePath)
 
-        try? migrator.migrate(dbPool)
+        do {
+            try migrator.migrate(dbPool)
+        } catch {
+            NSLog("[GrdbStorage] Migration failed: \(error)")
+        }
     }
 
     var migrator: DatabaseMigrator {
@@ -80,13 +84,13 @@ class GrdbStorage {
     }
 
     func transaction(byHash: String) -> Transaction? {
-        try! dbPool.read { db in
+        try? dbPool.read { db in
             try Transaction.filter(Transaction.Columns.hash == byHash).fetchOne(db)
         }
     }
 
     func transactions(fromTimestamp: Int?, descending: Bool, type: TransactionFilterType?, limit: Int?) -> [Transaction] {
-        try! dbPool.read { db in
+        (try? dbPool.read { db in
             var query = Transaction.order(descending ? Transaction.Columns.timestamp.desc : Transaction.Columns.timestamp.asc)
 
             if let fromTimestamp {
@@ -102,11 +106,11 @@ class GrdbStorage {
             }
 
             return try query.fetchAll(db)
-        }
+        }) ?? []
     }
 
     func update(transactions: [Transaction]) {
-        try! dbPool.write { db in
+        try? dbPool.write { db in
             try Transaction.deleteAll(db)
 
             for transaction in transactions {
@@ -116,7 +120,7 @@ class GrdbStorage {
     }
 
     func update(subAddresses: [SubAddress]) {
-        try! dbPool.write { db in
+        try? dbPool.write { db in
             try SubAddress.deleteAll(db)
             for subAddress in subAddresses {
                 try subAddress.insert(db)
@@ -125,13 +129,13 @@ class GrdbStorage {
     }
 
     func add(subAddress: SubAddress) {
-        try! dbPool.write { db in
+        try? dbPool.write { db in
             try subAddress.insert(db)
         }
     }
 
     func update(balance: Balance) {
-        try! dbPool.write { db in
+        try? dbPool.write { db in
             try Balance.deleteAll(db)
             try balance.insert(db)
         }
@@ -145,43 +149,43 @@ class GrdbStorage {
     }
 
     func addressExists(_ address: String) -> Bool {
-        try! dbPool.read { db in
+        (try? dbPool.read { db in
             try SubAddress.filter(SubAddress.Columns.address == address).fetchOne(db) != nil
-        }
+        }) ?? false
     }
 
     func setAddressTransactionsCount(index: Int, txCount: Int) {
-        _ = try! dbPool.write { db in
+        try? dbPool.write { db in
             try SubAddress.filter(SubAddress.Columns.index == index).updateAll(db, [SubAddress.Columns.transactionsCount.set(to: txCount)])
         }
     }
 
     func getLastUnusedAddress() -> SubAddress? {
-        try! dbPool.read { db in
+        try? dbPool.read { db in
             try SubAddress.filter(SubAddress.Columns.transactionsCount == 0).order(SubAddress.Columns.index.desc).fetchOne(db)
         }
     }
 
     func getAddress(index: Int) -> SubAddress? {
-        try! dbPool.read { db in
+        try? dbPool.read { db in
             try SubAddress.filter(SubAddress.Columns.index == index).fetchOne(db)
         }
     }
 
     func getAllAddresses() -> [SubAddress] {
-        try! dbPool.read { db in
+        (try? dbPool.read { db in
             try SubAddress.order(SubAddress.Columns.index.asc).fetchAll(db)
-        }
+        }) ?? []
     }
 
     func getBalance() -> Balance? {
-        try! dbPool.read { db in
+        try? dbPool.read { db in
             try Balance.fetchOne(db)
         }
     }
 
     func getBlockHeights() -> BlockHeights? {
-        try! dbPool.read { db in
+        try? dbPool.read { db in
             try BlockHeights.fetchOne(db)
         }
     }
