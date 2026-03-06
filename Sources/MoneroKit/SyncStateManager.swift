@@ -199,6 +199,19 @@ class SyncStateManager {
         scheduleNextCheck()
     }
 
+    /// Pause polling without destroying state — sync can resume via start()
+    func pause() {
+        timerLock.lock()
+        isRunning = false
+        timer?.cancel()
+        timer = nil
+        timerLock.unlock()
+
+        if let walletPointer {
+            MONERO_Wallet_pauseRefresh(walletPointer)
+        }
+    }
+
     func stop() {
         timerLock.lock()
         isRunning = false
