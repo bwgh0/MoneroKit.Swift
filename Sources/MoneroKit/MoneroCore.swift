@@ -415,6 +415,14 @@ class MoneroCore {
         startStateManager()
     }
 
+    /// Pause sync — stops refresh thread and state manager polling
+    /// Unlike stop(), this preserves pointers and callbacks so sync can resume
+    func pauseSync() {
+        guard let walletPtr = walletPointer else { return }
+        MONERO_Wallet_pauseRefresh(walletPtr)
+        stateManager.pause()
+    }
+
     func setConnectingState(waiting: Bool) {
         stateManager.state = .connecting(waiting: waiting)
     }
