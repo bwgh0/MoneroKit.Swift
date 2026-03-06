@@ -244,6 +244,11 @@ public class Kit {
         moneroCore.startSync()
     }
 
+    /// Pause sync — stops refresh thread and state polling
+    public func pauseSync() {
+        moneroCore.pauseSync()
+    }
+
     public func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws {
         try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo)
     }
