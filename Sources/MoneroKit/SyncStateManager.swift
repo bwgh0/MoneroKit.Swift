@@ -67,6 +67,11 @@ class SyncStateManager {
     }
 
     private func evaluateState() -> WalletState {
+        // Always keep blockHeights current for confirmation calculations
+        if walletHeight > 0, daemonHeight > 0 {
+            blockHeights = (walletHeight, daemonHeight)
+        }
+
         guard reachabilityManager.isReachable else {
             return .idle(daemonReachable: false)
         }
@@ -91,7 +96,6 @@ class SyncStateManager {
             return .syncing(progress: 100, remainingBlocksCount: 0)
         }
 
-        blockHeights = (walletHeight, daemonHeight)
         return .syncing(progress: numberOfBlocksSynced * 100 / numberOfBlocksToSync, remainingBlocksCount: numberOfBlocksToSync - numberOfBlocksSynced)
     }
 
