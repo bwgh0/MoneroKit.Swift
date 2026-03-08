@@ -32,6 +32,13 @@ Package.resolved
 .swiftpm
 .build/
 
+# CMake build artifacts
+build-ios-device/
+build-ios-simulator/
+
+# Backup files
+*.bak
+
 # Local dev notes (contain server IPs, test credentials)
 LIGHT_WALLET_TODO.md
 *.todo.md
