@@ -1,0 +1,7 @@
+/Users/j/Documents/GitHub/MoneroKit.Swift/build-ios-device/CMakeFiles/MyMoneroCore.dir
+/Users/j/Documents/GitHub/MoneroKit.Swift/build-ios-device/CMakeFiles/edit_cache.dir
+/Users/j/Documents/GitHub/MoneroKit.Swift/build-ios-device/CMakeFiles/rebuild_cache.dir
+/Users/j/Documents/GitHub/MoneroKit.Swift/build-ios-device/CMakeFiles/list_install_components.dir
+/Users/j/Documents/GitHub/MoneroKit.Swift/build-ios-device/CMakeFiles/install.dir
+/Users/j/Documents/GitHub/MoneroKit.Swift/build-ios-device/CMakeFiles/install/local.dir
+/Users/j/Documents/GitHub/MoneroKit.Swift/build-ios-device/CMakeFiles/install/strip.dir
