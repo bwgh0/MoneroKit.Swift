@@ -49,15 +49,6 @@ public class Kit {
             do {
                 let primaryAddress = try MoneroCore.address(wallet: wallet, account: account, index: 0, networkType: networkType)
                 storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
-
-                if account == 0 {
-                    if case .watch = wallet {
-                        return
-                    }
-
-                    let firstSubAddress = try MoneroCore.address(wallet: wallet, account: account, index: 1, networkType: networkType)
-                    storage.add(subAddress: SubAddress(address: firstSubAddress, index: 1))
-                }
             } catch {
                 // Static address derivation failed (likely polyseed)
                 // Addresses will be populated when wallet opens via start()
@@ -66,7 +57,14 @@ public class Kit {
     }
 
     deinit {
-        _stop()
+        guard started else { return }
+        started = false
+        let core = moneroCore
+        let id = kitId
+        lifecycleQueue.async {
+            core.stop()
+            KitManager.shared.removeRunning(kitId: id)
+        }
     }
 
     // Methods interacting with wallet cache in storage
@@ -165,41 +163,36 @@ public class Kit {
 
         if kitState == .running {
             moneroCore.setConnectingState(waiting: false)
-            moneroCore.start()
 
-            // For polyseed wallets, storage may be empty because static address derivation fails
-            // Populate addresses now that wallet is open and walletPointer is set
+            // Phase 1: Create/recover wallet object (fast, no network)
+            moneroCore.prepare()
+
+            // Derive address immediately — wallet pointer is set, no daemon needed
             let currentAddresses = storage.getAllAddresses()
-
-            // Ensure primary address (index 0) exists - may be missing for polyseed
             let hasIndex0 = currentAddresses.contains { $0.index == 0 && !$0.address.isEmpty }
+            NSLog("[Kit] _start: hasIndex0=%d, currentAddresses=%d", hasIndex0 ? 1 : 0, currentAddresses.count)
             if !hasIndex0 {
                 let primaryAddress = moneroCore.address(index: 0)
+                NSLog("[Kit] _start: derived address len=%d", primaryAddress.count)
                 if !primaryAddress.isEmpty {
                     storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
-
-                    // Also ensure first subaddress for account 0
-                    let hasIndex1 = currentAddresses.contains { $0.index == 1 && !$0.address.isEmpty }
-                    if !hasIndex1 {
-                        let firstSubAddress = moneroCore.address(index: 1)
-                        if !firstSubAddress.isEmpty {
-                            storage.add(subAddress: SubAddress(address: firstSubAddress, index: 1))
-                        }
-                    }
-
-                    // Notify delegate that addresses are now available
-                    delegate?.subAddressesUpdated(subaddresses: storage.getAllAddresses())
+                    let allAddrs = storage.getAllAddresses()
+                    NSLog("[Kit] _start: stored, now %d addrs. Notifying delegate.", allAddrs.count)
+                    delegate?.subAddressesUpdated(subaddresses: allAddrs)
                 }
             }
+
+            // Phase 2: Connect to daemon (slow — network roundtrip)
+            moneroCore.connectToDaemon()
+
+            // Phase 3: Start refresh thread and state polling
+            moneroCore.startServices()
         }
     }
 
     private func _stop() {
         guard started else { return }
         started = false
-        NSLog("[Kit] _stop() called, kitId=\(kitId)")
-        Thread.callStackSymbols.prefix(10).forEach { NSLog("[Kit] stack: \($0)") }
-
         moneroCore.stop()
         KitManager.shared.removeRunning(kitId: kitId)
     }
@@ -286,11 +279,8 @@ extension Kit: MoneroCoreDelegate {
     }
 
     func subAddresssesDidChange(subAddresses: [MoneroCore.SubAddress]) {
-        if moneroCore.account == 0 && subAddresses.count <= 1 {
-            // 0 account must keep 2 addresses created on Kit initialization
-            return
-        } else if subAddresses.count == 0 {
-            // > 0 accounts must keep 1 address created on Kit initialization
+        if subAddresses.count == 0 {
+            // Must keep at least the primary address created on Kit initialization
             return
         }
 
