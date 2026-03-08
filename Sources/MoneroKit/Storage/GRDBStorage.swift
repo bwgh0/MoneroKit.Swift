@@ -130,6 +130,9 @@ class GrdbStorage {
 
     func add(subAddress: SubAddress) {
         try? dbPool.write { db in
+            // Remove any existing entry for this index to prevent duplicates
+            // (SubAddress has no primary key on index, so insert alone would duplicate)
+            try SubAddress.filter(SubAddress.Columns.index == subAddress.index).deleteAll(db)
             try subAddress.insert(db)
         }
     }

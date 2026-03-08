@@ -182,6 +182,22 @@ class MoneroCore {
             return
         }
 
+        // Set wallet pointer immediately after recovery — address derivation
+        // only needs the wallet2 object, not a daemon connection.
+        walletPointer = walletPtr
+        wallet.clear()
+
+        // Log wallet address for debugging
+        if let addr = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0)) {
+            NSLog("[MoneroCore] Wallet primary address: \(addr)")
+        }
+    }
+
+    /// Connect wallet to daemon. Requires wallet to be opened first via openWallet().
+    /// This is the slow part — network connection to the remote node.
+    private func connectDaemon() {
+        guard let walletPtr = walletPointer else { return }
+
         let cDaemonAddress = strdup((node.url.absoluteString as NSString).utf8String)
         let cDaemonLogin = strdup(((node.login ?? "") as NSString).utf8String)
         let cDaemonPassword = strdup(((node.password ?? "") as NSString).utf8String)
@@ -200,14 +216,6 @@ class MoneroCore {
         NSLog("[MoneroCore] Wallet initialized successfully with daemon, self=\(Unmanaged.passUnretained(self).toOpaque())")
 
         MONERO_Wallet_setTrustedDaemon(walletPtr, node.isTrusted)
-
-        walletPointer = recoveredWalletPtr
-        wallet.clear()
-
-        // Log wallet address for debugging
-        if let addr = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0)) {
-            NSLog("[MoneroCore] Wallet primary address: \(addr)")
-        }
     }
 
     private func onSyncStateChanged() {
@@ -254,11 +262,14 @@ class MoneroCore {
         let count = MONERO_Wallet_numSubaddresses(walletPointer, account)
 
         for i in 0 ..< count {
-            if let address = stringFromCString(MONERO_Wallet_address(walletPointer, UInt64(account), UInt64(i))) {
+            if let address = stringFromCString(MONERO_Wallet_address(walletPointer, UInt64(account), UInt64(i))),
+               !address.isEmpty {
                 fetchedAddresses.append(.init(address: address, index: i))
             }
         }
 
+        // Don't propagate if C++ returned no valid addresses — it's not ready yet
+        guard !fetchedAddresses.isEmpty else { return }
         subAddresses = fetchedAddresses
     }
 
@@ -332,7 +343,8 @@ class MoneroCore {
             }
         }
 
-        if hasUnconfirmedTransactions, biggestConfirmations < Kit.confirmationsThreshold {
+        if hasUnconfirmedTransactions, biggestConfirmations < Kit.confirmationsThreshold,
+           stateManager.walletHeight >= biggestConfirmations {
             walletListener.setLockedBalanceHeight(height: stateManager.walletHeight - biggestConfirmations)
         }
     }
@@ -377,7 +389,9 @@ class MoneroCore {
         stateManager.queue.sync(flags: .barrier) { }
     }
 
-    func start() {
+    /// Open the wallet without connecting to daemon or starting services.
+    /// After this, walletPointer is set and address derivation works.
+    func prepare() {
         guard walletManagerPointer != nil else {
             logger?.error("Error: Could not get WalletManager instance.")
             return
@@ -385,7 +399,23 @@ class MoneroCore {
 
         stateManager.validateReachable()
         startCore()
+    }
+
+    /// Connect to the daemon node. Call after prepare() and address derivation.
+    /// This is the slow part — network roundtrip to the remote node.
+    func connectToDaemon() {
+        connectDaemon()
+    }
+
+    /// Start the refresh thread and state polling. Must call connectToDaemon() first.
+    func startServices() {
         startWalletServices()
+    }
+
+    func start() {
+        prepare()
+        connectToDaemon()
+        startServices()
     }
 
     func stop() {

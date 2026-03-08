@@ -16,11 +16,13 @@ class SyncStateManager {
 
     private static let queueKey = DispatchSpecificKey<Bool>()
     let queue: DispatchQueue
+    private let workerQueue: DispatchQueue
     private var timer: DispatchSourceTimer?
     private let timerLock = NSLock()
+    private var isCheckInFlight = false
 
     private var connectStartTime: Date?
-    private var walletReadyTime: Date?  // Set when wallet2 is initialized (walletHeight > 0)
+    private var walletReadyTime: Date?  // Legacy — kept for potential future use
     private var hasConnectedOnce: Bool = false  // Track if we've established daemon connection
     private var backgroundSyncSetupSuccess: Bool = false
     private var restoreHeight: UInt64
@@ -56,6 +58,7 @@ class SyncStateManager {
         self.restoreHeight = restoreHeight
 
         self.queue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_state_queue", qos: .userInitiated)
+        self.workerQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_worker_queue", qos: .background)
         queue.setSpecific(key: Self.queueKey, value: true)
 
         reachabilityManager.$isReachable
@@ -76,9 +79,9 @@ class SyncStateManager {
             return .idle(daemonReachable: false)
         }
 
-        // Only check timeout after wallet2 is ready (walletHeight > 0)
-        // This prevents false timeouts during C++ initialization on fresh loads
-        if daemonHeight == 0, let walletReadyTime, Date().timeIntervalSince(walletReadyTime) > Self.connectTimeout {
+        // Timeout if daemon height never arrives — use connectStartTime so the
+        // timeout fires even on fresh wallets where walletHeight is still 0
+        if daemonHeight == 0, let connectStartTime, Date().timeIntervalSince(connectStartTime) > Self.connectTimeout {
             return .notSynced(error: .statusError("Connection timed out"))
         }
 
@@ -107,44 +110,79 @@ class SyncStateManager {
         }
         timerLock.unlock()
 
-        walletHeight = MONERO_Wallet_blockChainHeight(walletPtr)
-        isSynchronized = MONERO_Wallet_synchronized(walletPtr)
-        let status = MONERO_Wallet_status(walletPtr)
+        // Dispatch blocking C++ calls to worker queue if none are in-flight
+        if !isCheckInFlight {
+            isCheckInFlight = true
+            workerQueue.async { [weak self] in
+                // These C++ calls may block for 30+ seconds when wallet2's
+                // refresh thread holds internal locks during slow daemon I/O
+                let height = MONERO_Wallet_blockChainHeight(walletPtr)
+                let synchronized = MONERO_Wallet_synchronized(walletPtr)
+                let status = MONERO_Wallet_status(walletPtr)
+                let errorStr: String? = status != 0
+                    ? stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "Unknown wallet error"
+                    : nil
+                let dHeight = MONERO_Wallet_daemonBlockChainHeight(walletPtr)
 
-        // Track when wallet2 is ready (has processed at least one block)
-        // This ensures we don't timeout during C++ initialization
+                self?.queue.async {
+                    self?.applyCheckResults(
+                        walletHeight: height,
+                        isSynchronized: synchronized,
+                        status: status,
+                        errorStr: errorStr,
+                        daemonHeight: dHeight
+                    )
+                }
+            }
+        }
+
+        // Always evaluate state with current (possibly stale) values so
+        // timeout detection and state callbacks keep working
+        state = evaluateState()
+
+        // Always schedule the next check so polling never stops
+        scheduleNextCheck()
+    }
+
+    /// Apply results from the worker queue's C++ calls and re-evaluate state.
+    /// Called on `queue`.
+    private func applyCheckResults(
+        walletHeight: UInt64,
+        isSynchronized: Bool,
+        status: Int32,
+        errorStr: String?,
+        daemonHeight: UInt64
+    ) {
+        isCheckInFlight = false
+
+        guard isRunning else { return }
+
+        self.walletHeight = walletHeight
+        self.isSynchronized = isSynchronized
+
         if walletHeight > 0 && walletReadyTime == nil {
             walletReadyTime = Date()
         }
 
-        if status != 0 {
-            let errorCStr = MONERO_Wallet_errorString(walletPtr)
-            let errorStr = stringFromCString(errorCStr) ?? "Unknown wallet error"
+        if let errorStr, status != 0 {
             logger?.error("Wallet is in error state (\(status)): \(errorStr).")
-
-            // Only surface errors to user if we've connected at least once
-            // During initial connection, transient errors are expected
             if hasConnectedOnce {
                 state = .notSynced(error: WalletStateError.statusError(errorStr))
                 return
             }
-            // Otherwise, continue checking - let evaluateState handle connecting state
         }
 
         if lastStoredBlockHeight < restoreHeight {
             lastStoredBlockHeight = walletHeight
         }
 
-        daemonHeight = MONERO_Wallet_daemonBlockChainHeight(walletPtr)
+        self.daemonHeight = daemonHeight
 
-        // Track when we first establish daemon connection
         if daemonHeight > 0 && !hasConnectedOnce {
             hasConnectedOnce = true
         }
 
         state = evaluateState()
-
-        scheduleNextCheck()
     }
 
     private func scheduleNextCheck() {
@@ -211,6 +249,10 @@ class SyncStateManager {
         timer = nil
         timerLock.unlock()
 
+        // Wait for any in-flight C++ calls to finish before pausing refresh,
+        // so we don't call pauseRefresh while the worker is still reading wallet state
+        workerQueue.sync { }
+
         if let walletPointer {
             MONERO_Wallet_pauseRefresh(walletPointer)
         }
@@ -230,15 +272,11 @@ class SyncStateManager {
             queue.sync { }
         }
 
-//        if let walletPtr = walletPointer {
-//            let stopped = MONERO_Wallet_stopBackgroundSync(walletPtr, cWalletPassword)
-//            if !stopped {
-//                let errorCStr = MONERO_Wallet_errorString(walletPtr)
-//                let msg = stringFromCString(errorCStr) ?? "Setup background sync error"
-//                logger?.error("Error stop Background sync: \(msg)")
-//                return
-//            }
-//        }
+        // Drain the worker queue so no C++ calls are in-flight when we nil the pointer
+        workerQueue.sync { }
+
+        isCheckInFlight = false
+
         connectStartTime = nil
         walletReadyTime = nil
         hasConnectedOnce = false
