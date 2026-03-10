@@ -366,7 +366,9 @@ class MoneroCore {
             if let wp = walletPointer {
                 let cppHeight = MONERO_Wallet_getRefreshFromBlockHeight(wp)
                 if cppHeight > 0 && cppHeight != restoreHeight {
+                    #if DEBUG
                     NSLog("[MoneroCore] C++ refreshFromBlockHeight=%llu (was %llu), updating", cppHeight, restoreHeight)
+                    #endif
                     restoreHeight = cppHeight
                     stateManager.updateRestoreHeight(cppHeight)
                     delegate?.restoreHeightUpdated(height: cppHeight)
