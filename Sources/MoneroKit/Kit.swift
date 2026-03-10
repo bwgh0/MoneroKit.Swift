@@ -69,6 +69,12 @@ public class Kit {
 
     // Methods interacting with wallet cache in storage
 
+    /// The actual refresh-from-block-height as set by the C++ wallet.
+    /// For Polyseed wallets, this is decoded from the seed's embedded birthday.
+    public var refreshFromBlockHeight: UInt64 {
+        moneroCore.actualRefreshFromBlockHeight
+    }
+
     public var lastBlockInfo: UInt64 {
         var walletHeight = moneroCore.blockHeights?.0
         if walletHeight == nil {
@@ -295,6 +301,10 @@ extension Kit: MoneroCoreDelegate {
         delegate?.balanceDidChange(balanceInfo: BalanceInfo(balance: balanceRecord))
     }
 
+    func restoreHeightUpdated(height: UInt64) {
+        delegate?.restoreHeightUpdated(height: height)
+    }
+
     func transactionsDidChange(transactions: [MoneroCore.Transaction]) {
         let transactionRecords = transactions.compactMap { transaction in
             let type = transaction.direction == .in ? TransactionType.incoming : .outgoing
@@ -382,4 +392,5 @@ public protocol MoneroKitDelegate: AnyObject {
     func subAddressesUpdated(subaddresses: [SubAddress])
     func transactionsUpdated(inserted: [TransactionInfo], updated: [TransactionInfo])
     func walletStateDidChange(state: WalletState)
+    func restoreHeightUpdated(height: UInt64)
 }
