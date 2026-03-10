@@ -52,6 +52,10 @@ class SyncStateManager {
         return lastStoredBlockHeight <= walletHeight && walletHeight - lastStoredBlockHeight >= Self.storeBlocksCount
     }
 
+    func updateRestoreHeight(_ height: UInt64) {
+        restoreHeight = height
+    }
+
     init(logger: Logger?, restoreHeight: UInt64, reachabilityManager: ReachabilityManager) {
         self.logger = logger
         self.reachabilityManager = reachabilityManager

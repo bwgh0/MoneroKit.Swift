@@ -22,6 +22,12 @@ class MoneroCore {
     var account: UInt32
     var node: Node
 
+    /// The actual refresh-from-block-height set by the C++ wallet (e.g. decoded from Polyseed birthday)
+    var actualRefreshFromBlockHeight: UInt64 {
+        guard let walletPtr = walletPointer else { return restoreHeight }
+        return MONERO_Wallet_getRefreshFromBlockHeight(walletPtr)
+    }
+
     private var transactions: [Transaction] = [] {
         didSet {
             globalEventQueue.async { [weak self] in
@@ -353,6 +359,19 @@ class MoneroCore {
         guard walletPointer == nil else { return }
         do {
             try openWallet()
+
+            // After wallet is open, read the actual refresh height set by the C++ library.
+            // For Polyseed wallets this is the decoded birthday — use it instead of whatever
+            // was passed in, so progress calculations and UI display are correct.
+            if let wp = walletPointer {
+                let cppHeight = MONERO_Wallet_getRefreshFromBlockHeight(wp)
+                if cppHeight > 0 && cppHeight != restoreHeight {
+                    NSLog("[MoneroCore] C++ refreshFromBlockHeight=%llu (was %llu), updating", cppHeight, restoreHeight)
+                    restoreHeight = cppHeight
+                    stateManager.updateRestoreHeight(cppHeight)
+                    delegate?.restoreHeightUpdated(height: cppHeight)
+                }
+            }
         } catch {
             stateManager.state = .notSynced(error: .startError(error.localizedDescription))
         }
@@ -685,4 +704,5 @@ protocol MoneroCoreDelegate: AnyObject {
     func transactionsDidChange(transactions: [MoneroCore.Transaction])
     func subAddresssesDidChange(subAddresses: [MoneroCore.SubAddress])
     func walletStateDidChange(state: WalletState)
+    func restoreHeightUpdated(height: UInt64)
 }
