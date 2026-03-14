@@ -5,7 +5,20 @@ class GrdbStorage {
     var dbPool: DatabasePool
 
     init(databaseFilePath: String) {
-        dbPool = try! DatabasePool(path: databaseFilePath)
+        do {
+            dbPool = try DatabasePool(path: databaseFilePath)
+        } catch {
+            NSLog("[GrdbStorage] Failed to open database: \(error). Deleting and recreating.")
+            let walFiles = ["", "-wal", "-shm"].map { databaseFilePath + $0 }
+            for file in walFiles {
+                try? FileManager.default.removeItem(atPath: file)
+            }
+            do {
+                dbPool = try DatabasePool(path: databaseFilePath)
+            } catch {
+                fatalError("[GrdbStorage] Cannot create database even after reset: \(error)")
+            }
+        }
 
         do {
             try migrator.migrate(dbPool)

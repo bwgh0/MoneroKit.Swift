@@ -7,6 +7,7 @@ class MoneroCore {
     weak var delegate: MoneroCoreDelegate?
 
     private let globalEventQueue = DispatchQueue.global(qos: .userInteractive)
+    private let refreshQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_refresh_queue", qos: .utility)
 
     private var wallet: MoneroWallet
     private var stateManager: SyncStateManager
@@ -238,13 +239,17 @@ class MoneroCore {
 
         case .synced:
             stateManager.stop()
-            refresh()
-            stateManager.walletStored()
+            refreshQueue.async { [weak self] in
+                self?.refresh()
+                self?.stateManager.walletStored()
+            }
 
         case .syncing:
             if stateManager.chunkOfBlocksSynced {
-                refresh()
-                stateManager.walletStored()
+                refreshQueue.async { [weak self] in
+                    self?.refresh(isSyncChunk: true)
+                    self?.stateManager.walletStored()
+                }
             }
 
         case let .idle(daemonReachable):
@@ -279,7 +284,7 @@ class MoneroCore {
         subAddresses = fetchedAddresses
     }
 
-    private func fetchTransactions(walletPointer: UnsafeMutableRawPointer) {
+    private func fetchTransactions(walletPointer: UnsafeMutableRawPointer, skipNotes: Bool = false) {
         let historyPtr = MONERO_Wallet_history(walletPointer)
         MONERO_TransactionHistory_refresh(historyPtr)
 
@@ -308,8 +313,11 @@ class MoneroCore {
                 subaddrIndices = subaddrIndicesStr.split(separator: " ").compactMap { Int($0) }
             }
 
-            var note: String? = stringFromCString(MONERO_Wallet_getUserNote(walletPointer, hash))
-            if let _note = note, _note.isEmpty { note = nil }
+            var note: String?
+            if !skipNotes {
+                note = stringFromCString(MONERO_Wallet_getUserNote(walletPointer, hash))
+                if let _note = note, _note.isEmpty { note = nil }
+            }
 
             let transaction = Transaction(
                 direction: direction,
@@ -445,11 +453,11 @@ class MoneroCore {
         stopCore()
     }
 
-    func refresh() {
+    func refresh(isSyncChunk: Bool = false) {
         guard let walletPtr = walletPointer else { return }
         updateBalance(walletPointer: walletPtr)
         fetchSubaddresses(walletPointer: walletPtr)
-        fetchTransactions(walletPointer: walletPtr)
+        fetchTransactions(walletPointer: walletPtr, skipNotes: isSyncChunk)
         storeWallet(walletPointer: walletPtr)
     }
 
@@ -488,6 +496,11 @@ class MoneroCore {
     /// - Returns: The index and address of the newly created subaddress
     func addSubaddress(label: String = "") -> (index: Int, address: String)? {
         guard let walletPtr = walletPointer else { return nil }
+
+        // Pause refresh thread — wallet2 isn't thread-safe for addSubaddress
+        // while refresh is running, causing an abort in the C++ layer
+        MONERO_Wallet_pauseRefresh(walletPtr)
+        defer { MONERO_Wallet_startRefresh(walletPtr) }
 
         // Get current count before adding
         let countBefore = MONERO_Wallet_numSubaddresses(walletPtr, account)
