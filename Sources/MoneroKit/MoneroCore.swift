@@ -491,6 +491,23 @@ class MoneroCore {
         return stringFromCString(MONERO_Wallet_address(walletPtr, UInt64(account), UInt64(index))) ?? ""
     }
 
+    /// Returns the legacy 25-word Electrum-style seed from the running wallet.
+    /// Works for any wallet type — wallet2 always knows the legacy seed internally.
+    func getLegacySeed() -> String? {
+        guard let walletPtr = walletPointer else { return nil }
+        return stringFromCString(MONERO_Wallet_seed(walletPtr, ""))
+    }
+
+    /// Returns the polyseed (16 words) if the wallet was created with one.
+    /// Returns nil for BIP39/legacy wallets.
+    func getPolyseed() -> String? {
+        guard let walletPtr = walletPointer else { return nil }
+        let result = stringFromCString(MONERO_Wallet_getPolyseed(walletPtr, ""))
+        // wallet2 returns empty string if not a polyseed wallet
+        guard let result, !result.isEmpty else { return nil }
+        return result
+    }
+
     /// Add a new subaddress to the wallet
     /// - Parameter label: Optional label for the subaddress
     /// - Returns: The index and address of the newly created subaddress
