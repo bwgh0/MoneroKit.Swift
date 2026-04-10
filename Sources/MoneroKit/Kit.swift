@@ -256,6 +256,16 @@ public class Kit {
         try moneroCore.estimateFee(address: address, amount: amount, priority: priority)
     }
 
+    /// Returns the legacy 25-word seed from the running wallet.
+    public func getLegacySeed() -> String? {
+        moneroCore.getLegacySeed()
+    }
+
+    /// Returns the polyseed (16 words) if wallet was created with one. Nil otherwise.
+    public func getPolyseed() -> String? {
+        moneroCore.getPolyseed()
+    }
+
     /// Create a new subaddress
     /// - Parameter label: Optional label for the subaddress
     /// - Returns: The newly created SubAddress, or nil if creation failed
