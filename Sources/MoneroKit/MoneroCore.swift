@@ -275,7 +275,8 @@ class MoneroCore {
         for i in 0 ..< count {
             if let address = stringFromCString(MONERO_Wallet_address(walletPointer, UInt64(account), UInt64(i))),
                !address.isEmpty {
-                fetchedAddresses.append(.init(address: address, index: i))
+                let label = stringFromCString(MONERO_Wallet_getSubaddressLabel(walletPointer, account, UInt32(i))) ?? ""
+                fetchedAddresses.append(.init(address: address, index: i, label: label))
             }
         }
 
@@ -552,6 +553,33 @@ class MoneroCore {
         return (index: newIndex, address: newAddress)
     }
 
+    /// Read the label for a subaddress directly from wallet2's in-memory state
+    /// (sourced from the `.keys` cache on disk).
+    func getSubaddressLabel(index: Int) -> String {
+        guard let walletPtr = walletPointer else { return "" }
+        return stringFromCString(MONERO_Wallet_getSubaddressLabel(walletPtr, account, UInt32(index))) ?? ""
+    }
+
+    /// Set a label on an existing subaddress and persist to the wallet cache.
+    /// - Returns: true on success
+    @discardableResult
+    func setSubaddressLabel(index: Int, label: String) -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+
+        MONERO_Wallet_setSubaddressLabel(walletPtr, account, UInt32(index), label)
+
+        let status = MONERO_Wallet_status(walletPtr)
+        if status != 0 {
+            let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
+            NSLog("[MoneroCore] setSubaddressLabel failed status=\(status): \(errorStr)")
+            return false
+        }
+
+        _ = MONERO_Wallet_store(walletPtr, cWalletPath)
+        fetchSubaddresses(walletPointer: walletPtr)
+        return true
+    }
+
     func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String? = nil) throws {
         guard let walletPtr = walletPointer else {
             NSLog("[MoneroCore] send: walletPointer is nil")
@@ -639,6 +667,7 @@ class MoneroCore {
     struct SubAddress {
         let address: String
         let index: Int
+        let label: String
     }
 
     struct Balance: Equatable {
