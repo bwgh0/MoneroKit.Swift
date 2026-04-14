@@ -122,7 +122,18 @@ public class Kit {
     }
 
     public var usedAddresses: [SubAddress] {
-        storage.getAllAddresses()
+        enrichedAddresses()
+    }
+
+    /// Storage has no `label` column — wallet2's `.keys` cache is the source of
+    /// truth for labels. Re-populate labels on every read so they survive app
+    /// restarts and aren't wiped when storage-sourced paths fire the delegate.
+    private func enrichedAddresses() -> [SubAddress] {
+        let addresses = storage.getAllAddresses()
+        for addr in addresses {
+            addr.label = moneroCore.getSubaddressLabel(index: addr.index)
+        }
+        return addresses
     }
 
     public var statusInfo: [(String, Any)] {
@@ -182,10 +193,14 @@ public class Kit {
                 NSLog("[Kit] _start: derived address len=%d", primaryAddress.count)
                 if !primaryAddress.isEmpty {
                     storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
-                    let allAddrs = storage.getAllAddresses()
+                    let allAddrs = enrichedAddresses()
                     NSLog("[Kit] _start: stored, now %d addrs. Notifying delegate.", allAddrs.count)
                     delegate?.subAddressesUpdated(subaddresses: allAddrs)
                 }
+            } else {
+                // Existing addresses on cold start — fire delegate so UI picks up labels
+                // from wallet2's cache (GRDB doesn't persist labels).
+                delegate?.subAddressesUpdated(subaddresses: enrichedAddresses())
             }
 
             // Phase 2: Connect to daemon (slow — network roundtrip)
@@ -274,11 +289,18 @@ public class Kit {
             return nil
         }
 
-        let newSubAddress = SubAddress(address: result.address, index: result.index)
+        let newSubAddress = SubAddress(address: result.address, index: result.index, label: label)
         storage.add(subAddress: newSubAddress)
-        delegate?.subAddressesUpdated(subaddresses: storage.getAllAddresses())
+        delegate?.subAddressesUpdated(subaddresses: enrichedAddresses())
 
         return newSubAddress
+    }
+
+    /// Update the label on an existing subaddress. Persists to the wallet cache.
+    /// - Returns: true on success
+    @discardableResult
+    public func setSubaddressLabel(index: Int, label: String) -> Bool {
+        moneroCore.setSubaddressLabel(index: index, label: label)
     }
 }
 
@@ -300,7 +322,9 @@ extension Kit: MoneroCoreDelegate {
             return
         }
 
-        let subAddresses = subAddresses.map { SubAddress(address: $0.address, index: $0.index) }
+        let subAddresses = subAddresses.map {
+            SubAddress(address: $0.address, index: $0.index, label: $0.label)
+        }
         storage.update(subAddresses: subAddresses)
         delegate?.subAddressesUpdated(subaddresses: subAddresses)
     }

@@ -5,11 +5,15 @@ public class SubAddress: Record {
     public var address: String
     public var index: Int
     public var transactionsCount: Int
+    /// Transient user-defined label sourced from wallet2's `.keys` cache.
+    /// Not persisted in GRDB — wallet2 is the source of truth.
+    public var label: String
 
-    init(address: String, index: Int, transactionsCount: Int = 0) {
+    init(address: String, index: Int, transactionsCount: Int = 0, label: String = "") {
         self.address = address
         self.index = index
         self.transactionsCount = transactionsCount
+        self.label = label
 
         super.init()
     }
@@ -28,6 +32,7 @@ public class SubAddress: Record {
         address = row[Columns.address]
         index = row[Columns.index]
         transactionsCount = row[Columns.transactionsCount]
+        label = ""
 
         try super.init(row: row)
     }
