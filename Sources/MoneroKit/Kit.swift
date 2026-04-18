@@ -250,6 +250,21 @@ public class Kit {
         lifecycleQueue.async { [weak self] in self?._stop() }
     }
 
+    /// Async stop that resolves only after `_stop()` has fully run on the
+    /// lifecycle queue (which includes joining wallet2's refresh thread via
+    /// `MONERO_WalletManager_closeWallet`). Call this when the next action
+    /// — switching wallets, going to background — must not begin until the
+    /// previous wallet's C++ side is fully torn down. The fire-and-forget
+    /// `stop()` returns immediately and races whatever you do next.
+    public func stopAsync() async {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                self?._stop()
+                continuation.resume()
+            }
+        }
+    }
+
     public func refresh() {
         guard KitManager.shared.isRunning(kitId: kitId) else { return }
 
