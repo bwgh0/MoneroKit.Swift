@@ -66,6 +66,21 @@ class MoneroCore {
         stateManager.blockHeights
     }
 
+    /// True when the wallet has no spend key (created from address + view key).
+    /// Send / sign operations are rejected by wallet2 for view-only wallets.
+    var isWatchOnly: Bool {
+        guard let walletPtr = walletPointer else { return false }
+        return MONERO_Wallet_watchOnly(walletPtr)
+    }
+
+    /// The wallet's private view key as a 64-char lowercase hex string, or
+    /// nil if no wallet is currently open. Safe to expose — the view key
+    /// alone cannot authorize spending.
+    var secretViewKey: String? {
+        guard let walletPtr = walletPointer else { return nil }
+        return stringFromCString(MONERO_Wallet_secretViewKey(walletPtr))
+    }
+
     /// Internal accessor for wallet pointer
     func getWalletPointer() -> UnsafeMutableRawPointer? {
         return walletPointer
@@ -392,7 +407,10 @@ class MoneroCore {
         guard let wmp = walletManagerPointer, let wp = walletPointer else { return }
 
         NSLog("[MoneroCore] stopCore() called - closing wallet, self=\(Unmanaged.passUnretained(self).toOpaque())")
+        let t0 = Date()
         MONERO_WalletManager_closeWallet(wmp, wp, false)
+        let ms = Date().timeIntervalSince(t0) * 1000
+        NSLog("[MoneroCore] closeWallet returned after %.0fms", ms)
         walletPointer = nil
     }
 
@@ -409,14 +427,20 @@ class MoneroCore {
         NSLog("[MoneroCore] stopWalletServices() called, self=\(Unmanaged.passUnretained(self).toOpaque())")
 
         // Stop wallet listener first
+        let t1 = Date()
         walletListener.stop()
+        NSLog("[MoneroCore] walletListener.stop() took %.0fms", Date().timeIntervalSince(t1) * 1000)
 
         // Stop state manager (this cancels timers and clears callback)
+        let t2 = Date()
         stateManager.stop()
+        NSLog("[MoneroCore] stateManager.stop() took %.0fms", Date().timeIntervalSince(t2) * 1000)
 
         // Give any in-flight operations a chance to complete
         // by synchronously executing a barrier on the state manager's queue
+        let t3 = Date()
         stateManager.queue.sync(flags: .barrier) { }
+        NSLog("[MoneroCore] barrier wait took %.0fms", Date().timeIntervalSince(t3) * 1000)
     }
 
     /// Open the wallet without connecting to daemon or starting services.
