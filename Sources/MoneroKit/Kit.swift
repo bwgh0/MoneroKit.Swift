@@ -125,6 +125,18 @@ public class Kit {
         enrichedAddresses()
     }
 
+    /// True when this wallet was created from address + view key and has no
+    /// spend key — signing transactions is impossible.
+    public var isWatchOnly: Bool {
+        moneroCore.isWatchOnly
+    }
+
+    /// The wallet's private view key (64 hex chars). Share to create a
+    /// read-only wallet elsewhere; cannot be used to spend funds.
+    public var secretViewKey: String? {
+        moneroCore.secretViewKey
+    }
+
     /// Storage has no `label` column — wallet2's `.keys` cache is the source of
     /// truth for labels. Re-populate labels on every read so they survive app
     /// restarts and aren't wiped when storage-sourced paths fire the delegate.
