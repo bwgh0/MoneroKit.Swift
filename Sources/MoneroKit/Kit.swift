@@ -265,13 +265,22 @@ public class Kit {
         }
     }
 
+    /// Hop onto `lifecycleQueue` so wallet2 only ever runs on one thread.
+    /// Calling these directly from the caller's thread (especially Swift
+    /// cooperative pool tasks) races wallet2's own internal threads and
+    /// corrupts shared state — observed as a SIGSEGV in
+    /// `_platform_memmove` from `ostream::write` when two paths touched
+    /// the wallet2 logger/store concurrently.
     public func refresh() {
-        guard KitManager.shared.isRunning(kitId: kitId) else { return }
+        lifecycleQueue.async { [weak self] in
+            guard let self else { return }
+            guard KitManager.shared.isRunning(kitId: self.kitId) else { return }
 
-        switch moneroCore.state {
-        case .connecting, .syncing, .synced: moneroCore.refresh()
-        case .notSynced: restart()
-        case .idle: ()
+            switch self.moneroCore.state {
+            case .connecting, .syncing, .synced: self.moneroCore.refresh()
+            case .notSynced: self._restart()
+            case .idle: ()
+            }
         }
     }
 
@@ -282,12 +291,25 @@ public class Kit {
     /// Restart sync state checking to detect new blocks
     /// Call this after a period of inactivity to check for new blockchain activity
     public func startSync() {
-        moneroCore.startSync()
+        lifecycleQueue.async { [weak self] in self?.moneroCore.startSync() }
     }
 
     /// Pause sync — stops refresh thread and state polling
     public func pauseSync() {
-        moneroCore.pauseSync()
+        lifecycleQueue.async { [weak self] in self?.moneroCore.pauseSync() }
+    }
+
+    /// Async variant of `pauseSync` that resolves only after the pause has
+    /// actually run on `lifecycleQueue`. Use when the caller must finish
+    /// before something else happens — e.g. iOS suspending the process in
+    /// the background under a `beginBackgroundTask` assertion.
+    public func pauseSyncAsync() async {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                self?.moneroCore.pauseSync()
+                continuation.resume()
+            }
+        }
     }
 
     public func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws {
