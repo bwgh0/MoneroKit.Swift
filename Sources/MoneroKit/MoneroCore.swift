@@ -441,6 +441,18 @@ class MoneroCore {
         let t3 = Date()
         stateManager.queue.sync(flags: .barrier) { }
         NSLog("[MoneroCore] barrier wait took %.0fms", Date().timeIntervalSince(t3) * 1000)
+
+        // Drain refreshQueue before stopCore() frees the wallet pointer.
+        // onSyncStateChanged dispatches `self?.refresh()` onto refreshQueue,
+        // which captures walletPtr at the top of the block and uses it
+        // through updateBalance/fetchSubaddresses/fetchTransactions/
+        // storeWallet. Without this barrier, a refresh in flight can still
+        // be mid-store when closeWallet frees the pointer, and
+        // WalletImpl::store's call_befor_die destructor reads the freed
+        // wallet object and crashes on dereference.
+        let t4 = Date()
+        refreshQueue.sync(flags: .barrier) { }
+        NSLog("[MoneroCore] refreshQueue barrier took %.0fms", Date().timeIntervalSince(t4) * 1000)
     }
 
     /// Open the wallet without connecting to daemon or starting services.
