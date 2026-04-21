@@ -320,6 +320,13 @@ public class Kit {
         try moneroCore.estimateFee(address: address, amount: amount, priority: priority)
     }
 
+    /// Per-transaction secret key for the given txid, usable to prove the
+    /// payment to the recipient. Returns nil if wallet doesn't know the
+    /// key for this tx.
+    public func getTxKey(txId: String) -> String? {
+        moneroCore.getTxKey(txId: txId)
+    }
+
     /// Returns the legacy 25-word seed from the running wallet.
     public func getLegacySeed() -> String? {
         moneroCore.getLegacySeed()

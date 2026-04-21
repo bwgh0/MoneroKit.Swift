@@ -523,6 +523,19 @@ class MoneroCore {
         return stringFromCString(MONERO_Wallet_address(walletPtr, UInt64(account), UInt64(index))) ?? ""
     }
 
+    /// Returns the per-transaction secret key for `txId`. Combined with the
+    /// recipient address, this lets anyone verify the payment with
+    /// wallet2's `check_tx_key` without exposing the sender's view key.
+    /// Returns nil if the wallet doesn't know the key (e.g. incoming tx,
+    /// or outgoing tx from a different wallet).
+    func getTxKey(txId: String) -> String? {
+        guard let walletPtr = walletPointer else { return nil }
+        guard let key = stringFromCString(MONERO_Wallet_getTxKey(walletPtr, txId)), !key.isEmpty else {
+            return nil
+        }
+        return key
+    }
+
     /// Returns the legacy 25-word Electrum-style seed from the running wallet.
     /// Works for any wallet type — wallet2 always knows the legacy seed internally.
     func getLegacySeed() -> String? {
