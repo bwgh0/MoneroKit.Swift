@@ -431,16 +431,11 @@ class MoneroCore {
         walletListener.stop()
         NSLog("[MoneroCore] walletListener.stop() took %.0fms", Date().timeIntervalSince(t1) * 1000)
 
-        // Stop state manager (this cancels timers and clears callback)
+        // Stop state manager (this cancels timers, drains its own queue/worker,
+        // and clears the onSyncStateChanged callback).
         let t2 = Date()
         stateManager.stop()
         NSLog("[MoneroCore] stateManager.stop() took %.0fms", Date().timeIntervalSince(t2) * 1000)
-
-        // Give any in-flight operations a chance to complete
-        // by synchronously executing a barrier on the state manager's queue
-        let t3 = Date()
-        stateManager.queue.sync(flags: .barrier) { }
-        NSLog("[MoneroCore] barrier wait took %.0fms", Date().timeIntervalSince(t3) * 1000)
 
         // Drain refreshQueue before stopCore() frees the wallet pointer.
         // onSyncStateChanged dispatches `self?.refresh()` onto refreshQueue,
