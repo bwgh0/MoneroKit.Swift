@@ -579,6 +579,79 @@ class MoneroCore {
         return result
     }
 
+    // MARK: - Cold wallet primitives (hardware-wallet sidecar flow)
+    //
+    // Wallet2's cold/hot wallet model lets a watch-only wallet (cold) and
+    // a device-bound wallet (hot) synchronize state through opaque blobs.
+    // The host moves the blobs over BLE/THP — wallet2 just produces them
+    // and consumes them. Used by Trezor to populate spent-output state on
+    // the iPhone's primary watch-only wallet without keeping the device
+    // online during day-to-day refresh.
+
+    /// Export newly-discovered outputs for a sibling device-bound wallet
+    /// to generate key images for. Called on the cold (watch-only) wallet.
+    /// Returns a UR-encoded blob, or nil if the wallet isn't ready.
+    func exportOutputsUR(maxFragmentLength: Int = 1000, all: Bool = false) -> String? {
+        guard let walletPtr = walletPointer else { return nil }
+        return stringFromCString(MONERO_Wallet_exportOutputsUR(walletPtr, maxFragmentLength, all))
+    }
+
+    /// Consume an outputs blob exported from the sibling cold wallet so
+    /// the device-bound wallet can compute key images for those outputs.
+    /// Called on the hot (device-bound) wallet.
+    func importOutputsUR(_ blob: String) -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+        return MONERO_Wallet_importOutputsUR(walletPtr, blob)
+    }
+
+    /// Export key images the device-bound wallet just generated, for the
+    /// sibling cold wallet to import. Called on the hot wallet.
+    func exportKeyImagesUR(maxFragmentLength: Int = 1000, all: Bool = false) -> String? {
+        guard let walletPtr = walletPointer else { return nil }
+        return stringFromCString(MONERO_Wallet_exportKeyImagesUR(walletPtr, maxFragmentLength, all))
+    }
+
+    /// Consume a key-images blob from the sibling device-bound wallet.
+    /// Called on the cold wallet — once imported, outgoing transactions
+    /// decode correctly and balances reflect spent outputs.
+    func importKeyImagesUR(_ blob: String) -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+        return MONERO_Wallet_importKeyImagesUR(walletPtr, blob)
+    }
+
+    /// Submit a previously signed transaction by URI-encoded blob. Called
+    /// on either wallet — the broadcast just needs network access, not
+    /// the device.
+    func submitTransactionUR(_ blob: String) -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+        return MONERO_Wallet_submitTransactionUR(walletPtr, blob)
+    }
+
+    /// Re-establish the device transport on a hardware-bound wallet.
+    /// wallet2's internal Trezor / Ledger state caches a device handle
+    /// that may have gone stale (BLE drop, app suspend). Call this after
+    /// the BLE bridge is back up.
+    @discardableResult
+    func reconnectDevice() -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+        return MONERO_Wallet_reconnectDevice(walletPtr)
+    }
+
+    /// Backing device for the wallet's spend key. SOFTWARE means a normal
+    /// seed-derived wallet or watch-only wallet; LEDGER/TREZOR mean the
+    /// keys file was created with `restore_from_device` and wallet2
+    /// expects a live device transport.
+    func getDeviceType() -> DeviceType {
+        guard let walletPtr = walletPointer else { return .software }
+        return DeviceType(rawValue: MONERO_Wallet_getDeviceType(walletPtr)) ?? .software
+    }
+
+    enum DeviceType: Int32 {
+        case software = 0
+        case ledger = 1
+        case trezor = 2
+    }
+
     /// Add a new subaddress to the wallet
     /// - Parameter label: Optional label for the subaddress
     /// - Returns: The index and address of the newly created subaddress
