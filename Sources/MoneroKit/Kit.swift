@@ -358,6 +358,92 @@ public class Kit {
     public func setSubaddressLabel(index: Int, label: String) -> Bool {
         moneroCore.setSubaddressLabel(index: index, label: label)
     }
+
+    // MARK: - Cold wallet primitives (Trezor / Ledger sidecar flow)
+    //
+    // These thin wrappers move opaque blobs between two wallet2 instances
+    // — typically a watch-only "cold" wallet on the iPhone and a
+    // device-bound "hot" wallet that only opens during a reconnect
+    // session. All hop onto `lifecycleQueue` so they don't race the
+    // refresh thread.
+
+    /// Export new outputs for a sibling device wallet to sign. Called on
+    /// the cold wallet. Returns nil if the wallet isn't open.
+    public func exportOutputsUR(maxFragmentLength: Int = 1000, all: Bool = false) async -> String? {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.exportOutputsUR(maxFragmentLength: maxFragmentLength, all: all))
+            }
+        }
+    }
+
+    /// Import outputs into the device wallet so it can generate key
+    /// images. Called on the hot wallet.
+    public func importOutputsUR(_ blob: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.importOutputsUR(blob) ?? false)
+            }
+        }
+    }
+
+    /// Export key images the device just generated, for the cold wallet
+    /// to import. Called on the hot wallet.
+    public func exportKeyImagesUR(maxFragmentLength: Int = 1000, all: Bool = false) async -> String? {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.exportKeyImagesUR(maxFragmentLength: maxFragmentLength, all: all))
+            }
+        }
+    }
+
+    /// Import key images into the cold wallet so spent outputs decode
+    /// correctly and outgoing transactions become visible.
+    public func importKeyImagesUR(_ blob: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.importKeyImagesUR(blob) ?? false)
+            }
+        }
+    }
+
+    /// Broadcast a previously signed transaction blob.
+    public func submitTransactionUR(_ blob: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.submitTransactionUR(blob) ?? false)
+            }
+        }
+    }
+
+    /// Re-establish the device transport on a hardware-bound wallet.
+    /// Call this after the BLE bridge is back up but before any operation
+    /// that needs the device (signing, key-image generation).
+    public func reconnectDevice() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.reconnectDevice() ?? false)
+            }
+        }
+    }
+
+    /// Backing device for the wallet's spend key. `software` means a
+    /// normal seed-derived or watch-only wallet; `ledger`/`trezor` mean
+    /// the wallet was opened in device-bound mode and refresh requires
+    /// a live transport.
+    public var deviceType: DeviceType {
+        switch moneroCore.getDeviceType() {
+        case .software: return .software
+        case .ledger:   return .ledger
+        case .trezor:   return .trezor
+        }
+    }
+
+    public enum DeviceType {
+        case software
+        case ledger
+        case trezor
+    }
 }
 
 extension Kit: MoneroCoreDelegate {
