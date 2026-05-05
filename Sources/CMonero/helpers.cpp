@@ -6,15 +6,103 @@
 #include <vector>
 #include <string>
 #include "helpers.hpp"
+#include "wallet2_api.h"
 #include <set>
 #include <sstream>
 #include <cstring>
 #include <thread>
 #include <iostream>
 #include <stdexcept>
+#include <mutex>
 
 __attribute__((constructor))
 void library_init() {}
+
+// --- Hardware device bridge state ---
+//
+// wallet2's HIDAPI_DUMMY shim calls these statics to swap byte buffers
+// with a host-side transport. For Monero One the host side is the
+// Trezor BLE bridge (TrezorBridgeServer + THP channel); the same hooks
+// would also serve a Ledger transport.
+//
+// All state is guarded by s_deviceMutex because wallet2's signing
+// thread and the iOS BLE delegate queue both touch it.
+static std::mutex s_deviceMutex;
+static bool s_stateIsConnected = false;
+static bool s_waitsForDeviceSend = false;
+static bool s_waitsForDeviceReceive = false;
+static std::vector<unsigned char> s_sendToDevice;
+static std::vector<unsigned char> s_receivedFromDevice;
+static void (*s_ledgerCallback)(unsigned char*, unsigned int) = nullptr;
+
+bool Monero::Wallet::getStateIsConnected() {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    return s_stateIsConnected;
+}
+
+unsigned char* Monero::Wallet::getSendToDevice() {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    return s_sendToDevice.empty() ? nullptr : s_sendToDevice.data();
+}
+
+size_t Monero::Wallet::getSendToDeviceLength() {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    return s_sendToDevice.size();
+}
+
+unsigned char* Monero::Wallet::getReceivedFromDevice() {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    return s_receivedFromDevice.empty() ? nullptr : s_receivedFromDevice.data();
+}
+
+size_t Monero::Wallet::getReceivedFromDeviceLength() {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    return s_receivedFromDevice.size();
+}
+
+bool Monero::Wallet::getWaitsForDeviceSend() {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    return s_waitsForDeviceSend;
+}
+
+bool Monero::Wallet::getWaitsForDeviceReceive() {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    return s_waitsForDeviceReceive;
+}
+
+void Monero::Wallet::setDeviceReceivedData(unsigned char* data, size_t len) {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    s_receivedFromDevice.assign(data, data + len);
+}
+
+void Monero::Wallet::setDeviceSendData(unsigned char* data, size_t len) {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    s_sendToDevice.assign(data, data + len);
+}
+
+void Monero::Wallet::setLedgerCallback(void (*sendToLedgerDevice)(unsigned char* command, unsigned int cmd_len)) {
+    std::lock_guard<std::mutex> lock(s_deviceMutex);
+    s_ledgerCallback = sendToLedgerDevice;
+}
+
+// --- Custom utility statics referenced by wallet2_api.h ---
+//
+// These are not present in upstream Monero — they were declared in
+// our patched wallet2_api.h so the linker needs definitions. Real
+// derivation is done elsewhere; these stubs just satisfy the symbol
+// table.
+
+std::string Monero::Wallet::bytesToWords(const char* src) {
+    return "";
+}
+
+std::string Monero::Wallet::generateAddress(const std::string& seed, const std::string& seed_offset, uint32_t accountIndex, uint32_t addressIndex, bool testnet) {
+    return "";
+}
+
+std::string Monero::Wallet::generateKey(const std::string& seed, const std::string& seed_offset, const bool privateKey, const bool spendKey) {
+    return "";
+}
 
 const char* vectorToString(const std::vector<std::string>& vec, const std::string separator) {
     // Check if the vector is empty
