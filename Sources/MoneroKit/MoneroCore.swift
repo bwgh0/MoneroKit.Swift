@@ -193,6 +193,20 @@ class MoneroCore {
                     "",
                     1
                 )
+
+            case let .trezor(deviceName):
+                recoveredWalletPtr = MONERO_WalletManager_createWalletFromDevice(
+                    walletManagerPointer,
+                    cWalletPath,
+                    cWalletPassword,
+                    networkType.rawValue,
+                    (deviceName as NSString).utf8String,
+                    restoreHeight,
+                    "5:20",
+                    "",
+                    "",
+                    1
+                )
             }
         }
 
@@ -202,6 +216,18 @@ class MoneroCore {
             NSLog("[MoneroCore] ERROR recovering wallet: \(msg)")
             logger?.error("Error recovering wallet: \(msg)")
             return
+        }
+
+        // createWalletFromDevice can return non-null but leave wallet in an
+        // error state — wallet2 sets it when the bridge isn't reachable.
+        // Surface the error but continue init so the wallet is reusable
+        // once the device session reconnects.
+        let walletStatus = MONERO_Wallet_status(walletPtr)
+        if walletStatus != 0 {
+            let errorCStr = MONERO_Wallet_errorString(walletPtr)
+            let msg = stringFromCString(errorCStr) ?? "Unknown wallet error"
+            NSLog("[MoneroCore] Wallet status after creation: status=\(walletStatus), error=\(msg)")
+            logger?.error("Wallet status after creation: \(walletStatus) \(msg)")
         }
 
         // Set wallet pointer immediately after recovery — address derivation
@@ -747,6 +773,10 @@ extension MoneroCore {
         case .watch:
             resolvedSeedPhrase = ""
             resolvedPassphrase = ""
+
+        case .trezor:
+            resolvedSeedPhrase = ""
+            resolvedPassphrase = ""
         }
 
         return (resolvedSeedPhrase, resolvedPassphrase)
@@ -781,6 +811,13 @@ extension MoneroCore {
             } else {
                 return ""
             }
+
+        case .trezor:
+            // Trezor wallet keys live on-device — never returned from the
+            // host process. Caller should use Kit.secretViewKey or read the
+            // primary address from wallet2 once the device session populates
+            // them.
+            return nil
         }
     }
 
@@ -800,6 +837,11 @@ extension MoneroCore {
             } else {
                 return ""
             }
+
+        case .trezor:
+            // Address derivation requires a live device session. Empty until
+            // wallet2 has the device handshake to ask for it.
+            return ""
         }
     }
 }
