@@ -459,6 +459,20 @@ public class Kit {
         }
     }
 
+    /// Cold-key-image sync for HW wallets. The wallet iterates its
+    /// transfers, asks the device for key images via the bridge, and
+    /// internally imports them. After this returns successfully the
+    /// wallet's outgoing transactions decode correctly. Caller is
+    /// responsible for the BLE/bridge being up before invoking.
+    @discardableResult
+    public func coldKeyImageSync() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.coldKeyImageSync() ?? false)
+            }
+        }
+    }
+
     /// Backing device for the wallet's spend key. `software` means a
     /// normal seed-derived or watch-only wallet; `ledger`/`trezor` mean
     /// the wallet was opened in device-bound mode and refresh requires

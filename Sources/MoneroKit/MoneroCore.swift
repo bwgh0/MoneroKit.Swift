@@ -646,6 +646,30 @@ class MoneroCore {
         return DeviceType(rawValue: MONERO_Wallet_getDeviceType(walletPtr)) ?? .software
     }
 
+    /// Run wallet2's cold-key-image sync for HW-backed wallets. The
+    /// wallet itself iterates its `m_transfers` and asks the device
+    /// for key images, then internally imports them. Caller must
+    /// ensure the bridge HTTP server is running and the device is
+    /// reachable before invoking.
+    /// Returns true on success — the spent/unspent counts are not
+    /// surfaced to Swift since the C wrapper takes them by value
+    /// (a wallet2_api_c bug we don't currently fix here).
+    @discardableResult
+    func coldKeyImageSync() -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+        let result = MONERO_Wallet_coldKeyImageSync(walletPtr, 0, 0)
+        // wallet2 returns the number of imported key images on
+        // success, 0 if nothing imported (which is also valid for
+        // a wallet with no transfers). Treat any non-error status
+        // as success.
+        let status = MONERO_Wallet_status(walletPtr)
+        if status != 0 {
+            return false
+        }
+        _ = result
+        return true
+    }
+
     enum DeviceType: Int32 {
         case software = 0
         case ledger = 1
