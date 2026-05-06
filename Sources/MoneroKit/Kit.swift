@@ -473,6 +473,13 @@ public class Kit {
         }
     }
 
+    /// Latest wallet2 status code and error message. Useful for
+    /// surfacing why a cold-sign import returned false. Empty strings
+    /// when there's no error or no wallet open.
+    public var latestStatus: (code: Int32, message: String) {
+        moneroCore.latestStatus() ?? (0, "")
+    }
+
     /// Backing device for the wallet's spend key. `software` means a
     /// normal seed-derived or watch-only wallet; `ledger`/`trezor` mean
     /// the wallet was opened in device-bound mode and refresh requires

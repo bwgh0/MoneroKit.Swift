@@ -601,7 +601,14 @@ class MoneroCore {
     /// Called on the hot (device-bound) wallet.
     func importOutputsUR(_ blob: String) -> Bool {
         guard let walletPtr = walletPointer else { return false }
-        return MONERO_Wallet_importOutputsUR(walletPtr, blob)
+        let result = MONERO_Wallet_importOutputsUR(walletPtr, blob)
+        if !result {
+            let status = MONERO_Wallet_status(walletPtr)
+            let errorCStr = MONERO_Wallet_errorString(walletPtr)
+            let msg = stringFromCString(errorCStr) ?? "unknown"
+            NSLog("[MoneroCore] importOutputsUR FAILED: status=%d, error=%@", status, msg)
+        }
+        return result
     }
 
     /// Export key images the device-bound wallet just generated, for the
@@ -616,7 +623,14 @@ class MoneroCore {
     /// decode correctly and balances reflect spent outputs.
     func importKeyImagesUR(_ blob: String) -> Bool {
         guard let walletPtr = walletPointer else { return false }
-        return MONERO_Wallet_importKeyImagesUR(walletPtr, blob)
+        let result = MONERO_Wallet_importKeyImagesUR(walletPtr, blob)
+        if !result {
+            let status = MONERO_Wallet_status(walletPtr)
+            let errorCStr = MONERO_Wallet_errorString(walletPtr)
+            let msg = stringFromCString(errorCStr) ?? "unknown"
+            NSLog("[MoneroCore] importKeyImagesUR FAILED: status=%d, error=%@", status, msg)
+        }
+        return result
     }
 
     /// Submit a previously signed transaction by URI-encoded blob. Called
@@ -644,6 +658,16 @@ class MoneroCore {
     func getDeviceType() -> DeviceType {
         guard let walletPtr = walletPointer else { return .software }
         return DeviceType(rawValue: MONERO_Wallet_getDeviceType(walletPtr)) ?? .software
+    }
+
+    /// Latest wallet2 status + error string. Returns ("status code",
+    /// "<msg>") or nil if no wallet open. Useful right after a
+    /// failed cold-sign call to capture the real wallet2 error.
+    func latestStatus() -> (code: Int32, message: String)? {
+        guard let walletPtr = walletPointer else { return nil }
+        let status = MONERO_Wallet_status(walletPtr)
+        let msg = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? ""
+        return (status, msg)
     }
 
     /// Run wallet2's cold-key-image sync for HW-backed wallets. The
