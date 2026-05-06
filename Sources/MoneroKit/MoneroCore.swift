@@ -579,67 +579,13 @@ class MoneroCore {
         return result
     }
 
-    // MARK: - Cold wallet primitives (hardware-wallet sidecar flow)
+    // MARK: - Hardware-wallet sync primitives
     //
-    // Wallet2's cold/hot wallet model lets a watch-only wallet (cold) and
-    // a device-bound wallet (hot) synchronize state through opaque blobs.
-    // The host moves the blobs over BLE/THP — wallet2 just produces them
-    // and consumes them. Used by Trezor to populate spent-output state on
-    // the iPhone's primary watch-only wallet without keeping the device
-    // online during day-to-day refresh.
-
-    /// Export newly-discovered outputs for a sibling device-bound wallet
-    /// to generate key images for. Called on the cold (watch-only) wallet.
-    /// Returns a UR-encoded blob, or nil if the wallet isn't ready.
-    func exportOutputsUR(maxFragmentLength: Int = 1000, all: Bool = false) -> String? {
-        guard let walletPtr = walletPointer else { return nil }
-        return stringFromCString(MONERO_Wallet_exportOutputsUR(walletPtr, maxFragmentLength, all))
-    }
-
-    /// Consume an outputs blob exported from the sibling cold wallet so
-    /// the device-bound wallet can compute key images for those outputs.
-    /// Called on the hot (device-bound) wallet.
-    func importOutputsUR(_ blob: String) -> Bool {
-        guard let walletPtr = walletPointer else { return false }
-        let result = MONERO_Wallet_importOutputsUR(walletPtr, blob)
-        if !result {
-            let status = MONERO_Wallet_status(walletPtr)
-            let errorCStr = MONERO_Wallet_errorString(walletPtr)
-            let msg = stringFromCString(errorCStr) ?? "unknown"
-            NSLog("[MoneroCore] importOutputsUR FAILED: status=%d, error=%@", status, msg)
-        }
-        return result
-    }
-
-    /// Export key images the device-bound wallet just generated, for the
-    /// sibling cold wallet to import. Called on the hot wallet.
-    func exportKeyImagesUR(maxFragmentLength: Int = 1000, all: Bool = false) -> String? {
-        guard let walletPtr = walletPointer else { return nil }
-        return stringFromCString(MONERO_Wallet_exportKeyImagesUR(walletPtr, maxFragmentLength, all))
-    }
-
-    /// Consume a key-images blob from the sibling device-bound wallet.
-    /// Called on the cold wallet — once imported, outgoing transactions
-    /// decode correctly and balances reflect spent outputs.
-    func importKeyImagesUR(_ blob: String) -> Bool {
-        guard let walletPtr = walletPointer else { return false }
-        let result = MONERO_Wallet_importKeyImagesUR(walletPtr, blob)
-        if !result {
-            let status = MONERO_Wallet_status(walletPtr)
-            let errorCStr = MONERO_Wallet_errorString(walletPtr)
-            let msg = stringFromCString(errorCStr) ?? "unknown"
-            NSLog("[MoneroCore] importKeyImagesUR FAILED: status=%d, error=%@", status, msg)
-        }
-        return result
-    }
-
-    /// Submit a previously signed transaction by URI-encoded blob. Called
-    /// on either wallet — the broadcast just needs network access, not
-    /// the device.
-    func submitTransactionUR(_ blob: String) -> Bool {
-        guard let walletPtr = walletPointer else { return false }
-        return MONERO_Wallet_submitTransactionUR(walletPtr, blob)
-    }
+    // The dual-cache architecture keeps a SOFTWARE/watch_only wallet
+    // running 24/7 (no device needed) for incoming-tx visibility, and
+    // a separate TREZOR-bound wallet that opens only during reconnect
+    // sessions to run `cold_key_image_sync` against the device. The
+    // session-time wallet uses the methods below.
 
     /// Re-establish the device transport on a hardware-bound wallet.
     /// wallet2's internal Trezor / Ledger state caches a device handle
