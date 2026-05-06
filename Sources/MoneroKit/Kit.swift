@@ -246,6 +246,38 @@ public class Kit {
         lifecycleQueue.async { [self] in self._start() }
     }
 
+    /// Open the wallet (run `prepare()` — wallet2 reads the keys file
+    /// and, for hardware-backed wallets, talks to the device through
+    /// the bridge to populate the keys + primary address) but DO NOT
+    /// connect to a daemon or start the refresh thread.
+    ///
+    /// This is the path to use for transient sidecars in the cold-sign
+    /// blob exchange flow. wallet2's `import_outputs` throws
+    /// "Hot wallets cannot import outputs" when
+    /// `m_has_ever_refreshed_from_node` is true, and that flag is set
+    /// the first time a refresh runs. So sidecars must be opened —
+    /// device session, key images, sign — and torn down without ever
+    /// having refreshed. `prepareOnly()` is that path.
+    ///
+    /// Returns once `prepare()` has run on `lifecycleQueue`. After
+    /// that the caller can read `runtimePrimaryAddress`, call
+    /// `exportKeyImagesUR` / `importOutputsUR` / etc., and then
+    /// `stopAsync()`.
+    public func prepareOnly() async {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [self] in
+                guard !started else {
+                    continuation.resume()
+                    return
+                }
+                started = true
+                _ = KitManager.shared.checkAndGetInitialState(kitId: kitId)
+                moneroCore.prepare()
+                continuation.resume()
+            }
+        }
+    }
+
     public func stop() {
         lifecycleQueue.async { [weak self] in self?._stop() }
     }
