@@ -759,6 +759,19 @@ class MoneroCore {
         }
         NSLog("[MoneroCore] send: transaction committed successfully")
 
+        // Pull the fresh outgoing tx into storage immediately so any
+        // caller that reads `kit.transactions(...)` right after `send`
+        // returns sees it. `startStateManager()` does refresh on its
+        // own polling thread, but the dispatch is async — by the time
+        // it runs, the hardware-session driver has already snapshotted
+        // tx history (to persist the outgoing entry while the FULL
+        // wallet is still open). Without this synchronous fetch the
+        // snapshot is missing the just-sent tx and the home screen
+        // shows the change UTXO as a Received row until the next
+        // refresh tick.
+        fetchTransactions(walletPointer: walletPtr)
+        updateBalance(walletPointer: walletPtr)
+
         startStateManager()
     }
 
