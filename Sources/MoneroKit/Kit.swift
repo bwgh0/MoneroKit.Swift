@@ -260,12 +260,18 @@ public class Kit {
     /// having refreshed. `prepareOnly()` is that path.
     ///
     /// Returns once `prepare()` has run on `lifecycleQueue`. After
-    /// that the caller can read `runtimePrimaryAddress`, call
-    /// `exportKeyImagesUR` / `importOutputsUR` / etc., and then
-    /// `stopAsync()`.
+    /// that the caller can read `runtimePrimaryAddress` and then
+    /// `stopAsync()`. (The blob-exchange `exportKeyImagesUR` /
+    /// `importOutputsUR` path the original doc mentioned was removed
+    /// in favor of `coldKeyImageSync` — this helper is now only used
+    /// by sidecar-style transient wallets.)
     public func prepareOnly() async {
         await withCheckedContinuation { continuation in
-            lifecycleQueue.async { [self] in
+            lifecycleQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume()
+                    return
+                }
                 guard !started else {
                     continuation.resume()
                     return
@@ -345,7 +351,25 @@ public class Kit {
     }
 
     public func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws {
-        try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo)
+        // Serialize through `lifecycleQueue` so the inline
+        // `fetchTransactions` + `updateBalance` that `MoneroCore.send`
+        // now performs after commit (so callers can immediately read
+        // the just-broadcast tx) doesn't race a concurrent refresh
+        // or estimateFee on the same wallet pointer.
+        var result: Result<Void, Error>!
+        lifecycleQueue.sync {
+            guard KitManager.shared.isRunning(kitId: self.kitId) else {
+                result = .failure(MoneroCoreError.walletNotInitialized)
+                return
+            }
+            do {
+                try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo)
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+        }
+        try result.get()
     }
 
     public func estimateFee(address: String, amount: SendAmount, priority: SendPriority = .default) throws -> UInt64 {
@@ -451,16 +475,29 @@ public class Kit {
     /// Latest wallet2 status code and error message. Useful for
     /// surfacing why a cold-sign import returned false. Empty strings
     /// when there's no error or no wallet open.
+    /// Serialized through `lifecycleQueue` — the underlying read
+    /// touches the wallet pointer and races a concurrent
+    /// `coldKeyImageSync` / `refresh` mutation otherwise.
     public var latestStatus: (code: Int32, message: String) {
-        moneroCore.latestStatus() ?? (0, "")
+        var result: (Int32, String) = (0, "")
+        lifecycleQueue.sync {
+            result = moneroCore.latestStatus() ?? (0, "")
+        }
+        return result
     }
 
     /// Backing device for the wallet's spend key. `software` means a
     /// normal seed-derived or watch-only wallet; `ledger`/`trezor` mean
     /// the wallet was opened in device-bound mode and refresh requires
     /// a live transport.
+    /// Serialized through `lifecycleQueue` — same reasoning as
+    /// `latestStatus`; the wallet2 read isn't reentrant.
     public var deviceType: DeviceType {
-        switch moneroCore.getDeviceType() {
+        var raw: MoneroCore.DeviceType = .software
+        lifecycleQueue.sync {
+            raw = moneroCore.getDeviceType()
+        }
+        switch raw {
         case .software: return .software
         case .ledger:   return .ledger
         case .trezor:   return .trezor

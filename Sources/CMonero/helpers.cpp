@@ -35,54 +35,100 @@ static std::vector<unsigned char> s_sendToDevice;
 static std::vector<unsigned char> s_receivedFromDevice;
 static void (*s_ledgerCallback)(unsigned char*, unsigned int) = nullptr;
 
+// All bridge accessors below are wrapped in try/catch and treat
+// any exception (allocation failure, mutex error) as "no data" /
+// "not connected". These functions are called by wallet2's
+// HIDAPI_DUMMY shim from its own C++ code — but if any propagated
+// up into a context that doesn't unwind cleanly (e.g. across a
+// foreign-function-interface boundary), `std::terminate` would
+// abort the app. The host-side BLE transport is failure-tolerant
+// (the iOS side observes a timeout and resets the THP channel),
+// so dropping a single bridge exchange is strictly safer than
+// crashing the wallet process.
+
 bool Monero::Wallet::getStateIsConnected() {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    return s_stateIsConnected;
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        return s_stateIsConnected;
+    } catch (...) { return false; }
 }
 
 unsigned char* Monero::Wallet::getSendToDevice() {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    return s_sendToDevice.empty() ? nullptr : s_sendToDevice.data();
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        return s_sendToDevice.empty() ? nullptr : s_sendToDevice.data();
+    } catch (...) { return nullptr; }
 }
 
 size_t Monero::Wallet::getSendToDeviceLength() {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    return s_sendToDevice.size();
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        return s_sendToDevice.size();
+    } catch (...) { return 0; }
 }
 
 unsigned char* Monero::Wallet::getReceivedFromDevice() {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    return s_receivedFromDevice.empty() ? nullptr : s_receivedFromDevice.data();
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        return s_receivedFromDevice.empty() ? nullptr : s_receivedFromDevice.data();
+    } catch (...) { return nullptr; }
 }
 
 size_t Monero::Wallet::getReceivedFromDeviceLength() {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    return s_receivedFromDevice.size();
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        return s_receivedFromDevice.size();
+    } catch (...) { return 0; }
 }
 
 bool Monero::Wallet::getWaitsForDeviceSend() {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    return s_waitsForDeviceSend;
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        return s_waitsForDeviceSend;
+    } catch (...) { return false; }
 }
 
 bool Monero::Wallet::getWaitsForDeviceReceive() {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    return s_waitsForDeviceReceive;
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        return s_waitsForDeviceReceive;
+    } catch (...) { return false; }
 }
 
+// Caller must pass a contiguous buffer of at least `len` bytes (or
+// nullptr / len=0 to clear). A misformed (data, len) pair would
+// trigger an out-of-bounds read inside `vector::assign`; guard
+// explicitly so a Swift bug can't corrupt memory here.
 void Monero::Wallet::setDeviceReceivedData(unsigned char* data, size_t len) {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    s_receivedFromDevice.assign(data, data + len);
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        if (data == nullptr || len == 0) {
+            s_receivedFromDevice.clear();
+            return;
+        }
+        s_receivedFromDevice.assign(data, data + len);
+    } catch (...) {
+        // OOM or other failure — leave the buffer in its prior
+        // state; wallet2 will time out waiting for a response.
+    }
 }
 
 void Monero::Wallet::setDeviceSendData(unsigned char* data, size_t len) {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    s_sendToDevice.assign(data, data + len);
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        if (data == nullptr || len == 0) {
+            s_sendToDevice.clear();
+            return;
+        }
+        s_sendToDevice.assign(data, data + len);
+    } catch (...) { /* see setDeviceReceivedData */ }
 }
 
 void Monero::Wallet::setLedgerCallback(void (*sendToLedgerDevice)(unsigned char* command, unsigned int cmd_len)) {
-    std::lock_guard<std::mutex> lock(s_deviceMutex);
-    s_ledgerCallback = sendToLedgerDevice;
+    try {
+        std::lock_guard<std::mutex> lock(s_deviceMutex);
+        s_ledgerCallback = sendToLedgerDevice;
+    } catch (...) { /* mutex lock can throw std::system_error */ }
 }
 
 // --- Custom utility statics referenced by wallet2_api.h ---
