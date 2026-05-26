@@ -193,6 +193,20 @@ class MoneroCore {
                     "",
                     1
                 )
+
+            case let .trezor(deviceName):
+                recoveredWalletPtr = MONERO_WalletManager_createWalletFromDevice(
+                    walletManagerPointer,
+                    cWalletPath,
+                    cWalletPassword,
+                    networkType.rawValue,
+                    (deviceName as NSString).utf8String,
+                    restoreHeight,
+                    "5:20",
+                    "",
+                    "",
+                    1
+                )
             }
         }
 
@@ -204,15 +218,29 @@ class MoneroCore {
             return
         }
 
+        // createWalletFromDevice can return non-null but leave wallet in an
+        // error state — wallet2 sets it when the bridge isn't reachable.
+        // Surface the error but continue init so the wallet is reusable
+        // once the device session reconnects.
+        let walletStatus = MONERO_Wallet_status(walletPtr)
+        if walletStatus != 0 {
+            let errorCStr = MONERO_Wallet_errorString(walletPtr)
+            let msg = stringFromCString(errorCStr) ?? "Unknown wallet error"
+            NSLog("[MoneroCore] Wallet status after creation: status=\(walletStatus), error=\(msg)")
+            logger?.error("Wallet status after creation: \(walletStatus) \(msg)")
+        }
+
         // Set wallet pointer immediately after recovery — address derivation
         // only needs the wallet2 object, not a daemon connection.
         walletPointer = walletPtr
         wallet.clear()
 
-        // Log wallet address for debugging
-        if let addr = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0)) {
-            NSLog("[MoneroCore] Wallet primary address: \(addr)")
-        }
+        // Don't NSLog the primary address — combined with the balance
+        // log in updateBalance it produces an address+balance pair in
+        // the unified system log, which is a deanonymization vector
+        // if log access is ever compromised. Keep address derivation
+        // for the sync path that does need it elsewhere.
+        _ = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0))
     }
 
     /// Connect wallet to daemon. Requires wallet to be opened first via openWallet().
@@ -279,7 +307,8 @@ class MoneroCore {
     private func updateBalance(walletPointer: UnsafeMutableRawPointer) {
         let allBalance = MONERO_Wallet_balance(walletPointer, account)
         let unlocked = MONERO_Wallet_unlockedBalance(walletPointer, account)
-        NSLog("[MoneroCore] updateBalance: all=\(allBalance), unlocked=\(unlocked)")
+        // Intentionally no NSLog of balance values. See note in
+        // setupWalletKit re: address+balance correlation in syslog.
         balance = Balance(all: allBalance, unlocked: unlocked)
     }
 
@@ -553,6 +582,73 @@ class MoneroCore {
         return result
     }
 
+    // MARK: - Hardware-wallet sync primitives
+    //
+    // The dual-cache architecture keeps a SOFTWARE/watch_only wallet
+    // running 24/7 (no device needed) for incoming-tx visibility, and
+    // a separate TREZOR-bound wallet that opens only during reconnect
+    // sessions to run `cold_key_image_sync` against the device. The
+    // session-time wallet uses the methods below.
+
+    /// Re-establish the device transport on a hardware-bound wallet.
+    /// wallet2's internal Trezor / Ledger state caches a device handle
+    /// that may have gone stale (BLE drop, app suspend). Call this after
+    /// the BLE bridge is back up.
+    @discardableResult
+    func reconnectDevice() -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+        return MONERO_Wallet_reconnectDevice(walletPtr)
+    }
+
+    /// Backing device for the wallet's spend key. SOFTWARE means a normal
+    /// seed-derived wallet or watch-only wallet; LEDGER/TREZOR mean the
+    /// keys file was created with `restore_from_device` and wallet2
+    /// expects a live device transport.
+    func getDeviceType() -> DeviceType {
+        guard let walletPtr = walletPointer else { return .software }
+        return DeviceType(rawValue: MONERO_Wallet_getDeviceType(walletPtr)) ?? .software
+    }
+
+    /// Latest wallet2 status + error string. Returns ("status code",
+    /// "<msg>") or nil if no wallet open. Useful right after a
+    /// failed cold-sign call to capture the real wallet2 error.
+    func latestStatus() -> (code: Int32, message: String)? {
+        guard let walletPtr = walletPointer else { return nil }
+        let status = MONERO_Wallet_status(walletPtr)
+        let msg = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? ""
+        return (status, msg)
+    }
+
+    /// Run wallet2's cold-key-image sync for HW-backed wallets. The
+    /// wallet itself iterates its `m_transfers` and asks the device
+    /// for key images, then internally imports them. Caller must
+    /// ensure the bridge HTTP server is running and the device is
+    /// reachable before invoking.
+    /// Returns true on success — the spent/unspent counts are not
+    /// surfaced to Swift since the C wrapper takes them by value
+    /// (a wallet2_api_c bug we don't currently fix here).
+    @discardableResult
+    func coldKeyImageSync() -> Bool {
+        guard let walletPtr = walletPointer else { return false }
+        let result = MONERO_Wallet_coldKeyImageSync(walletPtr, 0, 0)
+        // wallet2 returns the number of imported key images on
+        // success, 0 if nothing imported (which is also valid for
+        // a wallet with no transfers). Treat any non-error status
+        // as success.
+        let status = MONERO_Wallet_status(walletPtr)
+        if status != 0 {
+            return false
+        }
+        _ = result
+        return true
+    }
+
+    enum DeviceType: Int32 {
+        case software = 0
+        case ledger = 1
+        case trezor = 2
+    }
+
     /// Add a new subaddress to the wallet
     /// - Parameter label: Optional label for the subaddress
     /// - Returns: The index and address of the newly created subaddress
@@ -666,6 +762,19 @@ class MoneroCore {
         }
         NSLog("[MoneroCore] send: transaction committed successfully")
 
+        // Pull the fresh outgoing tx into storage immediately so any
+        // caller that reads `kit.transactions(...)` right after `send`
+        // returns sees it. `startStateManager()` does refresh on its
+        // own polling thread, but the dispatch is async — by the time
+        // it runs, the hardware-session driver has already snapshotted
+        // tx history (to persist the outgoing entry while the FULL
+        // wallet is still open). Without this synchronous fetch the
+        // snapshot is missing the just-sent tx and the home screen
+        // shows the change UTXO as a Received row until the next
+        // refresh tick.
+        fetchTransactions(walletPointer: walletPtr)
+        updateBalance(walletPointer: walletPtr)
+
         startStateManager()
     }
 
@@ -747,6 +856,10 @@ extension MoneroCore {
         case .watch:
             resolvedSeedPhrase = ""
             resolvedPassphrase = ""
+
+        case .trezor:
+            resolvedSeedPhrase = ""
+            resolvedPassphrase = ""
         }
 
         return (resolvedSeedPhrase, resolvedPassphrase)
@@ -781,6 +894,13 @@ extension MoneroCore {
             } else {
                 return ""
             }
+
+        case .trezor:
+            // Trezor wallet keys live on-device — never returned from the
+            // host process. Caller should use Kit.secretViewKey or read the
+            // primary address from wallet2 once the device session populates
+            // them.
+            return nil
         }
     }
 
@@ -800,6 +920,11 @@ extension MoneroCore {
             } else {
                 return ""
             }
+
+        case .trezor:
+            // Address derivation requires a live device session. Empty until
+            // wallet2 has the device handshake to ask for it.
+            return ""
         }
     }
 }

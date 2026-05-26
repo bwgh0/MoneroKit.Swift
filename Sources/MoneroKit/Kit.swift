@@ -246,6 +246,44 @@ public class Kit {
         lifecycleQueue.async { [self] in self._start() }
     }
 
+    /// Open the wallet (run `prepare()` — wallet2 reads the keys file
+    /// and, for hardware-backed wallets, talks to the device through
+    /// the bridge to populate the keys + primary address) but DO NOT
+    /// connect to a daemon or start the refresh thread.
+    ///
+    /// This is the path to use for transient sidecars in the cold-sign
+    /// blob exchange flow. wallet2's `import_outputs` throws
+    /// "Hot wallets cannot import outputs" when
+    /// `m_has_ever_refreshed_from_node` is true, and that flag is set
+    /// the first time a refresh runs. So sidecars must be opened —
+    /// device session, key images, sign — and torn down without ever
+    /// having refreshed. `prepareOnly()` is that path.
+    ///
+    /// Returns once `prepare()` has run on `lifecycleQueue`. After
+    /// that the caller can read `runtimePrimaryAddress` and then
+    /// `stopAsync()`. (The blob-exchange `exportKeyImagesUR` /
+    /// `importOutputsUR` path the original doc mentioned was removed
+    /// in favor of `coldKeyImageSync` — this helper is now only used
+    /// by sidecar-style transient wallets.)
+    public func prepareOnly() async {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume()
+                    return
+                }
+                guard !started else {
+                    continuation.resume()
+                    return
+                }
+                started = true
+                _ = KitManager.shared.checkAndGetInitialState(kitId: kitId)
+                moneroCore.prepare()
+                continuation.resume()
+            }
+        }
+    }
+
     public func stop() {
         lifecycleQueue.async { [weak self] in self?._stop() }
     }
@@ -313,11 +351,55 @@ public class Kit {
     }
 
     public func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws {
-        try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo)
+        // Serialize through `lifecycleQueue` so the inline
+        // `fetchTransactions` + `updateBalance` that `MoneroCore.send`
+        // now performs after commit (so callers can immediately read
+        // the just-broadcast tx) doesn't race a concurrent refresh
+        // or estimateFee on the same wallet pointer.
+        var result: Result<Void, Error>!
+        lifecycleQueue.sync {
+            guard KitManager.shared.isRunning(kitId: self.kitId) else {
+                result = .failure(MoneroCoreError.walletNotInitialized)
+                return
+            }
+            do {
+                try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo)
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+        }
+        try result.get()
     }
 
     public func estimateFee(address: String, amount: SendAmount, priority: SendPriority = .default) throws -> UInt64 {
-        try moneroCore.estimateFee(address: address, amount: amount, priority: priority)
+        // Serialize through `lifecycleQueue` like every other wallet2
+        // op (refresh, send, store, startSync). The raw passthrough
+        // ran on whatever thread the caller was on (Swift cooperative
+        // pool in practice), which let multiple concurrent
+        // `estimateFee` Tasks plus a background `refresh` all race
+        // wallet2's internal mutex. Crash log signature:
+        // `MONERO_Wallet_estimateTransactionFee + 1344 -> abort`
+        // — a C++ exception (daemon timeout, fork-rule lookup, etc.)
+        // thrown while another thread held the lock, which
+        // `terminate()` turned into `abort()` because nothing in
+        // the C ABI wrapper caught it. `lifecycleQueue.sync` makes
+        // estimate wait for any in-flight queue op (refresh,
+        // store, send) before running, and serializes all estimates
+        // amongst themselves.
+        var result: Result<UInt64, Error>!
+        lifecycleQueue.sync {
+            guard KitManager.shared.isRunning(kitId: self.kitId) else {
+                result = .failure(MoneroCoreError.walletNotInitialized)
+                return
+            }
+            do {
+                result = .success(try moneroCore.estimateFee(address: address, amount: amount, priority: priority))
+            } catch {
+                result = .failure(error)
+            }
+        }
+        return try result.get()
     }
 
     /// Per-transaction secret key for the given txid, usable to prove the
@@ -357,6 +439,75 @@ public class Kit {
     @discardableResult
     public func setSubaddressLabel(index: Int, label: String) -> Bool {
         moneroCore.setSubaddressLabel(index: index, label: label)
+    }
+
+    // MARK: - Hardware-wallet sync (TREZOR-bound wallet only)
+    //
+    // The dual-cache architecture opens this Kit type during reconnect
+    // sessions. After refresh has populated m_transfers, the caller
+    // runs `coldKeyImageSync` to ask the device for signed key images.
+
+    /// Re-establish the device transport on a hardware-bound wallet.
+    /// Call this after the BLE bridge is back up but before any operation
+    /// that needs the device (signing, key-image generation).
+    public func reconnectDevice() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.reconnectDevice() ?? false)
+            }
+        }
+    }
+
+    /// Cold-key-image sync for HW wallets. The wallet iterates its
+    /// transfers, asks the device for key images via the bridge, and
+    /// internally imports them. After this returns successfully the
+    /// wallet's outgoing transactions decode correctly. Caller is
+    /// responsible for the BLE/bridge being up before invoking.
+    @discardableResult
+    public func coldKeyImageSync() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                continuation.resume(returning: self?.moneroCore.coldKeyImageSync() ?? false)
+            }
+        }
+    }
+
+    /// Latest wallet2 status code and error message. Useful for
+    /// surfacing why a cold-sign import returned false. Empty strings
+    /// when there's no error or no wallet open.
+    /// Serialized through `lifecycleQueue` — the underlying read
+    /// touches the wallet pointer and races a concurrent
+    /// `coldKeyImageSync` / `refresh` mutation otherwise.
+    public var latestStatus: (code: Int32, message: String) {
+        var result: (Int32, String) = (0, "")
+        lifecycleQueue.sync {
+            result = moneroCore.latestStatus() ?? (0, "")
+        }
+        return result
+    }
+
+    /// Backing device for the wallet's spend key. `software` means a
+    /// normal seed-derived or watch-only wallet; `ledger`/`trezor` mean
+    /// the wallet was opened in device-bound mode and refresh requires
+    /// a live transport.
+    /// Serialized through `lifecycleQueue` — same reasoning as
+    /// `latestStatus`; the wallet2 read isn't reentrant.
+    public var deviceType: DeviceType {
+        var raw: MoneroCore.DeviceType = .software
+        lifecycleQueue.sync {
+            raw = moneroCore.getDeviceType()
+        }
+        switch raw {
+        case .software: return .software
+        case .ledger:   return .ledger
+        case .trezor:   return .trezor
+        }
+    }
+
+    public enum DeviceType {
+        case software
+        case ledger
+        case trezor
     }
 }
 
