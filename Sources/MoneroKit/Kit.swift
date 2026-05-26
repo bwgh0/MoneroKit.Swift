@@ -349,7 +349,33 @@ public class Kit {
     }
 
     public func estimateFee(address: String, amount: SendAmount, priority: SendPriority = .default) throws -> UInt64 {
-        try moneroCore.estimateFee(address: address, amount: amount, priority: priority)
+        // Serialize through `lifecycleQueue` like every other wallet2
+        // op (refresh, send, store, startSync). The raw passthrough
+        // ran on whatever thread the caller was on (Swift cooperative
+        // pool in practice), which let multiple concurrent
+        // `estimateFee` Tasks plus a background `refresh` all race
+        // wallet2's internal mutex. Crash log signature:
+        // `MONERO_Wallet_estimateTransactionFee + 1344 -> abort`
+        // — a C++ exception (daemon timeout, fork-rule lookup, etc.)
+        // thrown while another thread held the lock, which
+        // `terminate()` turned into `abort()` because nothing in
+        // the C ABI wrapper caught it. `lifecycleQueue.sync` makes
+        // estimate wait for any in-flight queue op (refresh,
+        // store, send) before running, and serializes all estimates
+        // amongst themselves.
+        var result: Result<UInt64, Error>!
+        lifecycleQueue.sync {
+            guard KitManager.shared.isRunning(kitId: self.kitId) else {
+                result = .failure(MoneroCoreError.walletNotInitialized)
+                return
+            }
+            do {
+                result = .success(try moneroCore.estimateFee(address: address, amount: amount, priority: priority))
+            } catch {
+                result = .failure(error)
+            }
+        }
+        return try result.get()
     }
 
     /// Per-transaction secret key for the given txid, usable to prove the
