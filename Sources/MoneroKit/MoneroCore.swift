@@ -235,10 +235,12 @@ class MoneroCore {
         walletPointer = walletPtr
         wallet.clear()
 
-        // Log wallet address for debugging
-        if let addr = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0)) {
-            NSLog("[MoneroCore] Wallet primary address: \(addr)")
-        }
+        // Don't NSLog the primary address — combined with the balance
+        // log in updateBalance it produces an address+balance pair in
+        // the unified system log, which is a deanonymization vector
+        // if log access is ever compromised. Keep address derivation
+        // for the sync path that does need it elsewhere.
+        _ = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0))
     }
 
     /// Connect wallet to daemon. Requires wallet to be opened first via openWallet().
@@ -305,7 +307,8 @@ class MoneroCore {
     private func updateBalance(walletPointer: UnsafeMutableRawPointer) {
         let allBalance = MONERO_Wallet_balance(walletPointer, account)
         let unlocked = MONERO_Wallet_unlockedBalance(walletPointer, account)
-        NSLog("[MoneroCore] updateBalance: all=\(allBalance), unlocked=\(unlocked)")
+        // Intentionally no NSLog of balance values. See note in
+        // setupWalletKit re: address+balance correlation in syslog.
         balance = Balance(all: allBalance, unlocked: unlocked)
     }
 
