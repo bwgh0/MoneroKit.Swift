@@ -1,0 +1,28 @@
+NOTICE — Sources/CMonero
+
+The following files in this directory are derived from monero_c
+(https://github.com/mrcyjanek/monero_c) and are licensed under the
+GNU Lesser General Public License v3.0 (LGPL-3.0), NOT the MIT license
+that covers the rest of MoneroKit.Swift:
+
+  - wallet2_api_c.cpp
+  - wallet2_api_c.h
+  - helpers.cpp
+  - helpers.hpp
+  - monero_checksum.h
+
+MoneroOne's modifications to these files (iOS Trezor support and
+light-wallet fixes) are published, with the corresponding build scripts,
+as a fork of monero_c at:
+
+  https://github.com/bwgh0/monero_c
+
+The full LGPL-3.0 text is in COPYING.LESSER at the repository root.
+
+Separately, wallet2_api.h is part of the Monero core project
+(https://github.com/monero-project/monero) and is licensed under the
+BSD-3-Clause license; its original copyright header is retained in the file.
+
+The prebuilt static library Monero.xcframework/**/libMoneroCombined.a links
+the LGPL-3.0 monero_c code. Its corresponding source and the scripts used to
+build it are at https://github.com/bwgh0/monero_c (see BUILDING-MONEROONE.md).

@@ -2,6 +2,18 @@ MIT License
 
 Copyright (c) 2024-2026 MoneroKit Contributors
 
+This MIT license applies to the original MoneroKit.Swift source code. It does
+NOT apply to third-party code redistributed in this repository:
+
+  - Sources/CMonero/{wallet2_api_c.cpp, wallet2_api_c.h, helpers.cpp,
+    helpers.hpp, monero_checksum.h} are derived from monero_c
+    (https://github.com/mrcyjanek/monero_c) and are licensed under LGPL-3.0.
+    See COPYING.LESSER and Sources/CMonero/NOTICE.
+  - Sources/CMonero/wallet2_api.h is from the Monero core project and is
+    licensed BSD-3-Clause (see its header).
+  - Monero.xcframework/**/libMoneroCombined.a links LGPL-3.0 monero_c code;
+    corresponding source: https://github.com/bwgh0/monero_c.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
