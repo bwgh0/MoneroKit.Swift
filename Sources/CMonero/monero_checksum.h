@@ -1,3 +1,10 @@
+// This file is derived from monero_c (https://github.com/mrcyjanek/monero_c),
+// licensed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
+// It remains under LGPL-3.0 and is NOT covered by this repository's MIT LICENSE.
+// MoneroOne modifications (iOS Trezor support, light-wallet fixes) are published
+// as a fork at https://github.com/bwgh0/monero_c. See COPYING.LESSER for the
+// full license text and Sources/CMonero/NOTICE for details.
+
 #ifndef MONEROC_CHECKSUMS
 #define MONEROC_CHECKSUMS
 const char * MONERO_wallet2_api_c_h_sha256 = "91218f60e937753a606b1db899ee2ed66a1b02144eb2d79b950ce59804397f84";
