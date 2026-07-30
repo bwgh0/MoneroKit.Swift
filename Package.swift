@@ -44,6 +44,10 @@ let package = Package(
             name: "MoneroBinary",
             path: "Monero.xcframework"
         ),
+        .testTarget(
+            name: "MoneroKitTests",
+            dependencies: ["MoneroKit"]
+        ),
     ],
     cxxLanguageStandard: .cxx11
 )
