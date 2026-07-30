@@ -15,6 +15,12 @@ class MoneroCore {
     private var networkType: NetworkType = .mainnet
     private var walletManagerPointer: UnsafeMutableRawPointer?
     private var walletPointer: UnsafeMutableRawPointer?
+    /// True once the wallet opened/recovered with status == 0. Gates the
+    /// store-on-close in `stopCore()`: a wallet that never opened cleanly
+    /// (corrupt cache, unreachable hardware device) must not serialize its
+    /// empty in-memory state over a previously good cache file — that file
+    /// is the only holder of per-transaction keys.
+    private var walletOpenedCleanly = false
     private var cWalletPath: UnsafeMutablePointer<CChar>?
     private var cWalletPassword: UnsafeMutablePointer<CChar>?
     private let logger: Logger?
@@ -229,6 +235,7 @@ class MoneroCore {
             NSLog("[MoneroCore] Wallet status after creation: status=\(walletStatus), error=\(msg)")
             logger?.error("Wallet status after creation: \(walletStatus) \(msg)")
         }
+        walletOpenedCleanly = walletStatus == 0
 
         // Set wallet pointer immediately after recovery — address derivation
         // only needs the wallet2 object, not a daemon connection.
@@ -437,10 +444,16 @@ class MoneroCore {
 
         NSLog("[MoneroCore] stopCore() called - closing wallet, self=\(Unmanaged.passUnretained(self).toOpaque())")
         let t0 = Date()
-        MONERO_WalletManager_closeWallet(wmp, wp, false)
+        // Store on close for cleanly-opened wallets. Tx keys created since
+        // the last chunk store (up to 2000 blocks / anything sent while
+        // synced) live only in memory until a store — closing without one
+        // silently discards them, and tx keys are not reconstructible by a
+        // rescan.
+        MONERO_WalletManager_closeWallet(wmp, wp, walletOpenedCleanly)
         let ms = Date().timeIntervalSince(t0) * 1000
-        NSLog("[MoneroCore] closeWallet returned after %.0fms", ms)
+        NSLog("[MoneroCore] closeWallet returned after %.0fms (stored=\(walletOpenedCleanly))", ms)
         walletPointer = nil
+        walletOpenedCleanly = false
     }
 
     private func startWalletServices() {
@@ -774,6 +787,12 @@ class MoneroCore {
         // refresh tick.
         fetchTransactions(walletPointer: walletPtr)
         updateBalance(walletPointer: walletPtr)
+
+        // Persist the wallet cache right away: the commit just minted this
+        // transaction's tx key, which exists nowhere but in-memory wallet2
+        // state until a store. A crash/kill before the next chunk store
+        // would lose it permanently.
+        storeWallet(walletPointer: walletPtr)
 
         startStateManager()
     }
