@@ -20,7 +20,16 @@ public class Kit {
         storage = GrdbStorage(databaseFilePath: databasePath)
 
         let walletDirectoryName = "\(baseDirectoryName)/monero_core"
-        if storage.getBlockHeights() == nil {
+        // Clear a leftover wallet2 cache only when this walletId has never
+        // had a database — a genuinely new wallet must honor `restoreHeight`
+        // instead of silently resuming an orphaned cache from an earlier
+        // incarnation. Never remove it just because the heights row is
+        // missing or unreadable: the wallet2 cache is the sole holder of
+        // per-transaction keys, and a transient GRDB failure (WAL corruption
+        // after a crash, pool contention with an async teardown) must not
+        // destroy them. GRDB is derived data — it rebuilds from the wallet2
+        // cache on the next refresh; the reverse is impossible.
+        if storage.databaseWasFreshlyCreated, storage.getBlockHeights() == nil {
             try FileHandler.remove(for: walletDirectoryName)
         }
 
