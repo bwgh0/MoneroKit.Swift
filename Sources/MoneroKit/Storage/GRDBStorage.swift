@@ -4,7 +4,15 @@ import GRDB
 class GrdbStorage {
     var dbPool: DatabasePool
 
+    /// True when no database file existed at this path before init — the
+    /// first Kit init for this walletId. False on every reopen, including
+    /// the self-heal path below that deletes and recreates a corrupt db.
+    /// Callers use this to tell "genuinely new wallet" apart from "existing
+    /// wallet whose derived db is unreadable right now".
+    let databaseWasFreshlyCreated: Bool
+
     init(databaseFilePath: String) {
+        databaseWasFreshlyCreated = !FileManager.default.fileExists(atPath: databaseFilePath)
         do {
             dbPool = try DatabasePool(path: databaseFilePath)
         } catch {
