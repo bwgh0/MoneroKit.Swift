@@ -739,7 +739,13 @@ class MoneroCore {
             throw MoneroCoreError.walletNotInitialized
         }
 
+        // Recipient prefix + exact amount + timestamp is a strong selector
+        // against a chain explorer, and the unified log is readable via
+        // sysdiagnose, a tethered Mac, or MDM. Same reasoning as the primary
+        // address and balance logs removed above — keep it out of Release.
+        #if DEBUG
         NSLog("[MoneroCore] send: creating transaction to \(address.prefix(16))..., amount=\(amount.value), priority=\(priority.rawValue)")
+        #endif
         let cAddress = (address as NSString).utf8String
         let pendingTxPtr = MONERO_Wallet_createTransaction(walletPtr, cAddress, "", amount.value, 0, Int32(priority.rawValue), account, "", "")
 
@@ -805,7 +811,9 @@ class MoneroCore {
 
         let cAddress = (address as NSString).utf8String
         let cAmount = ("\(amount.value)" as NSString).utf8String
+        #if DEBUG
         NSLog("[MoneroCore] estimateFee: calling with amount=\(amount.value), priority=\(priority.rawValue)")
+        #endif
         let fee = MONERO_Wallet_estimateTransactionFee(walletPtr, cAddress, "", cAmount, "", Int32(priority.rawValue))
         let error = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? ""
         NSLog("[MoneroCore] estimateFee: fee=\(fee), error='\(error)'")
