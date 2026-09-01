@@ -141,79 +141,42 @@ class MoneroCore {
 
         if walletExists {
             recoveredWalletPtr = MONERO_WalletManager_openWallet(walletManagerPointer, cWalletPath, cWalletPassword, networkType.rawValue)
-        } else {
-            switch wallet {
-            case let .bip39(mnemonic, passphrase):
-                let legacySeed = try legacySeedFromBip39(mnemonic: mnemonic, passphrase: passphrase)
 
-                recoveredWalletPtr = MONERO_WalletManager_recoveryWallet(
-                    walletManagerPointer,
-                    cWalletPath,
-                    cWalletPassword,
-                    (legacySeed as NSString).utf8String,
-                    networkType.rawValue,
-                    restoreHeight,
-                    1,
-                    ""
-                )
-
-            case let .legacy(mnemonic, passphrase):
-                let seed = mnemonic.joined(separator: " ").decomposedStringWithCompatibilityMapping
-
-                recoveredWalletPtr = MONERO_WalletManager_recoveryWallet(
-                    walletManagerPointer,
-                    cWalletPath,
-                    cWalletPassword,
-                    (seed as NSString).utf8String,
-                    networkType.rawValue,
-                    restoreHeight,
-                    1,
-                    passphrase
-                )
-
-            case let .polyseed(mnemonic, passphrase):
-                let seed = mnemonic.joined(separator: " ").decomposedStringWithCompatibilityMapping
-
-                recoveredWalletPtr = MONERO_WalletManager_createWalletFromPolyseed(
-                    walletManagerPointer,
-                    cWalletPath,
-                    cWalletPassword,
-                    networkType.rawValue,
-                    (seed as NSString).utf8String,
-                    passphrase,
-                    false,
-                    restoreHeight,
-                    1
-                )
-
-            case let .watch(address, viewKey):
-                recoveredWalletPtr = MONERO_WalletManager_createWalletFromKeys(
-                    walletManagerPointer,
-                    cWalletPath,
-                    cWalletPassword,
-                    "",
-                    networkType.rawValue,
-                    restoreHeight,
-                    (address as NSString).utf8String,
-                    (viewKey as NSString).utf8String,
-                    "",
-                    1
-                )
-
-            case let .trezor(deviceName):
-                recoveredWalletPtr = MONERO_WalletManager_createWalletFromDevice(
-                    walletManagerPointer,
-                    cWalletPath,
-                    cWalletPassword,
-                    networkType.rawValue,
-                    (deviceName as NSString).utf8String,
-                    restoreHeight,
-                    "5:20",
-                    "",
-                    "",
-                    1
-                )
+            // wallet2's openWallet returns a non-null Wallet even when the
+            // `.keys` file failed to load or decrypt — the error lives in
+            // status() and the account keys stay default-constructed (all
+            // zeros). Using that object anyway serves the null-key address
+            // to the UI and burns anything sent to it. If we still hold the
+            // credentials (every source except a hardware device), discard
+            // the broken object, wipe the unreadable files, and re-derive
+            // the wallet from the credentials — same keys, at worst a
+            // rescan and the loss of stored per-tx keys.
+            let openStatus: Int32 = recoveredWalletPtr.map { MONERO_Wallet_status($0) } ?? 1
+            var canRecreate: Bool {
+                if case .trezor = wallet { return false }
+                return true
             }
+            if openStatus != 0, canRecreate {
+                let msg = recoveredWalletPtr
+                    .flatMap { stringFromCString(MONERO_Wallet_errorString($0)) } ?? "open returned null"
+                NSLog("[MoneroCore] ERROR opening existing wallet (status=\(openStatus)): \(msg) — recreating from credentials")
+                logger?.error("Error opening existing wallet (status=\(openStatus)): \(msg) — recreating from credentials")
+
+                if let brokenPtr = recoveredWalletPtr {
+                    // store=false: never let a keyless wallet object overwrite
+                    // the on-disk files.
+                    MONERO_WalletManager_closeWallet(walletManagerPointer, brokenPtr, false)
+                    recoveredWalletPtr = nil
+                }
+
+                let walletDir = URL(fileURLWithPath: String(cString: cWalletPath)).deletingLastPathComponent()
+                try? FileManager.default.removeItem(at: walletDir)
+                try? FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
+
+                recoveredWalletPtr = try createWalletFromCredentials()
+            }
+        } else {
+            recoveredWalletPtr = try createWalletFromCredentials()
         }
 
         guard let walletPtr = recoveredWalletPtr else {
@@ -221,20 +184,40 @@ class MoneroCore {
             let msg = stringFromCString(errorCStr) ?? "Unknown recovery error"
             NSLog("[MoneroCore] ERROR recovering wallet: \(msg)")
             logger?.error("Error recovering wallet: \(msg)")
-            return
+            throw MoneroCoreError.walletStatusError(msg)
         }
 
-        // createWalletFromDevice can return non-null but leave wallet in an
-        // error state — wallet2 sets it when the bridge isn't reachable.
-        // Surface the error but continue init so the wallet is reusable
-        // once the device session reconnects.
         let walletStatus = MONERO_Wallet_status(walletPtr)
         if walletStatus != 0 {
             let errorCStr = MONERO_Wallet_errorString(walletPtr)
             let msg = stringFromCString(errorCStr) ?? "Unknown wallet error"
             NSLog("[MoneroCore] Wallet status after creation: status=\(walletStatus), error=\(msg)")
             logger?.error("Wallet status after creation: \(walletStatus) \(msg)")
+
+            // Only a device-bound wallet may keep a pointer in an error
+            // state: createWalletFromDevice legitimately returns one when
+            // the Trezor bridge isn't reachable yet, and the object becomes
+            // usable once the device session reconnects. For every software
+            // source an error status means the keys are not the wallet's
+            // keys — fail the open rather than expose a keyless wallet.
+            guard case .trezor = wallet else {
+                MONERO_WalletManager_closeWallet(walletManagerPointer, walletPtr, false)
+                throw MoneroCoreError.walletStatusError(msg)
+            }
+        } else if case .trezor = wallet {} else {
+            // Belt and suspenders: even with status 0, refuse to run a
+            // software wallet whose keys read as zero — its receive address
+            // would be the null-key address and funds sent there are burned.
+            let viewKey = stringFromCString(MONERO_Wallet_secretViewKey(walletPtr))
+            let primary = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0)) ?? ""
+            if viewKey == NullKeyAddress.zeroSecretKey || NullKeyAddress.isNullKey(primary) {
+                NSLog("[MoneroCore] ERROR wallet opened with null keys — refusing to use it")
+                logger?.error("Wallet opened with null keys — refusing to use it")
+                MONERO_WalletManager_closeWallet(walletManagerPointer, walletPtr, false)
+                throw MoneroCoreError.walletStatusError("Wallet keys failed to load")
+            }
         }
+
         walletOpenedCleanly = walletStatus == 0
 
         // Set wallet pointer immediately after recovery — address derivation
@@ -248,6 +231,100 @@ class MoneroCore {
         // if log access is ever compromised. Keep address derivation
         // for the sync path that does need it elsewhere.
         _ = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0))
+    }
+
+    /// Create the wallet2 files at `cWalletPath` from the in-memory
+    /// credentials. Callable only while `wallet` still holds them (before
+    /// `wallet.clear()` runs at the end of a successful open).
+    private func createWalletFromCredentials() throws -> UnsafeMutableRawPointer? {
+        guard let walletManagerPointer, let cWalletPath else { return nil }
+
+        var recoveredWalletPtr: UnsafeMutableRawPointer?
+
+        switch wallet {
+        case let .bip39(mnemonic, passphrase):
+            // Recover directly from the derived spend key instead of going
+            // spend key → 25 words → wallet2 words_to_bytes → spend key.
+            // The words leg ran through Wallet::bytesToWords, a fork addition
+            // the current library builds stub out to return "" — the empty
+            // mnemonic made wallet2's recovery fail and every BIP39 wallet
+            // came up keyless (the null-address burn bug).
+            // `recoverDeterministicWalletFromSpendKey` calls
+            // wallet2::generate(spendkey, recover=true), the exact operation
+            // a 25-word restore performs after decoding, so keys are
+            // identical to what the words path produced when it worked.
+            let spendKeyHex = try spendKeyHexFromBip39(mnemonic: mnemonic, passphrase: passphrase)
+
+            recoveredWalletPtr = MONERO_WalletManager_createDeterministicWalletFromSpendKey(
+                walletManagerPointer,
+                cWalletPath,
+                cWalletPassword,
+                "English",
+                networkType.rawValue,
+                restoreHeight,
+                (spendKeyHex as NSString).utf8String,
+                1
+            )
+
+        case let .legacy(mnemonic, passphrase):
+            let seed = mnemonic.joined(separator: " ").decomposedStringWithCompatibilityMapping
+
+            recoveredWalletPtr = MONERO_WalletManager_recoveryWallet(
+                walletManagerPointer,
+                cWalletPath,
+                cWalletPassword,
+                (seed as NSString).utf8String,
+                networkType.rawValue,
+                restoreHeight,
+                1,
+                passphrase
+            )
+
+        case let .polyseed(mnemonic, passphrase):
+            let seed = mnemonic.joined(separator: " ").decomposedStringWithCompatibilityMapping
+
+            recoveredWalletPtr = MONERO_WalletManager_createWalletFromPolyseed(
+                walletManagerPointer,
+                cWalletPath,
+                cWalletPassword,
+                networkType.rawValue,
+                (seed as NSString).utf8String,
+                passphrase,
+                false,
+                restoreHeight,
+                1
+            )
+
+        case let .watch(address, viewKey):
+            recoveredWalletPtr = MONERO_WalletManager_createWalletFromKeys(
+                walletManagerPointer,
+                cWalletPath,
+                cWalletPassword,
+                "",
+                networkType.rawValue,
+                restoreHeight,
+                (address as NSString).utf8String,
+                (viewKey as NSString).utf8String,
+                "",
+                1
+            )
+
+        case let .trezor(deviceName):
+            recoveredWalletPtr = MONERO_WalletManager_createWalletFromDevice(
+                walletManagerPointer,
+                cWalletPath,
+                cWalletPassword,
+                networkType.rawValue,
+                (deviceName as NSString).utf8String,
+                restoreHeight,
+                "5:20",
+                "",
+                "",
+                1
+            )
+        }
+
+        return recoveredWalletPtr
     }
 
     /// Connect wallet to daemon. Requires wallet to be opened first via openWallet().
@@ -324,8 +401,11 @@ class MoneroCore {
         let count = MONERO_Wallet_numSubaddresses(walletPointer, account)
 
         for i in 0 ..< count {
+            // The null-key check keeps a keyless wallet2 object (keys file
+            // never loaded) from pushing the burn address into storage —
+            // it base58-encodes as a non-empty, superficially valid string.
             if let address = stringFromCString(MONERO_Wallet_address(walletPointer, UInt64(account), UInt64(i))),
-               !address.isEmpty {
+               !address.isEmpty, !NullKeyAddress.isNullKey(address) {
                 let label = stringFromCString(MONERO_Wallet_getSubaddressLabel(walletPointer, account, UInt32(i))) ?? ""
                 fetchedAddresses.append(.init(address: address, index: i, label: label))
             }
