@@ -57,7 +57,13 @@ public class Kit {
             // For polyseed, addresses will be populated after wallet opens via start()
             do {
                 let primaryAddress = try MoneroCore.address(wallet: wallet, account: account, index: 0, networkType: networkType)
-                storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
+                // Library builds that stub the static derivation return ""
+                // rather than throwing — never seed storage with an empty or
+                // null-key row; the runtime populates the real address after
+                // `start()` instead.
+                if !primaryAddress.isEmpty, !NullKeyAddress.isNullKey(primaryAddress) {
+                    storage.add(subAddress: SubAddress(address: primaryAddress, index: 0))
+                }
             } catch {
                 // Static address derivation failed (likely polyseed)
                 // Addresses will be populated when wallet opens via start()
@@ -115,19 +121,28 @@ public class Kit {
         return balanceRecord.map { BalanceInfo(balance: $0) } ?? .init(all: 0, unlocked: 0)
     }
 
+    // The address getters filter the null-key address (what wallet2 renders
+    // when its account keys were never loaded) so a storage row poisoned by
+    // an earlier keyless open can never reach a Receive screen — funds sent
+    // to it are unrecoverable. Returning "" lets the UI treat it as
+    // "address unavailable" instead.
+
     public var receiveAddress: String {
-        storage.getLastUnusedAddress()?.address ?? ""
+        guard let address = storage.getLastUnusedAddress()?.address, !NullKeyAddress.isNullKey(address) else { return "" }
+        return address
     }
 
     /// Primary address (index 0) - from storage (pre-computed)
     public var primaryAddress: String {
-        storage.getAddress(index: 0)?.address ?? ""
+        guard let address = storage.getAddress(index: 0)?.address, !NullKeyAddress.isNullKey(address) else { return "" }
+        return address
     }
 
     /// Primary address directly from wallet2 runtime - use for light wallet mode
     /// This ensures the address matches what wallet2 actually uses internally
     public var runtimePrimaryAddress: String {
-        moneroCore.address(index: 0)
+        let address = moneroCore.address(index: 0)
+        return NullKeyAddress.isNullKey(address) ? "" : address
     }
 
     public var usedAddresses: [SubAddress] {
@@ -142,15 +157,20 @@ public class Kit {
 
     /// The wallet's private view key (64 hex chars). Share to create a
     /// read-only wallet elsewhere; cannot be used to spend funds.
+    /// Returns nil for an all-zero key — that means the wallet's keys were
+    /// never loaded, and exporting it would hand out a broken watch key.
     public var secretViewKey: String? {
-        moneroCore.secretViewKey
+        guard let key = moneroCore.secretViewKey, key != NullKeyAddress.zeroSecretKey else { return nil }
+        return key
     }
 
     /// Storage has no `label` column — wallet2's `.keys` cache is the source of
     /// truth for labels. Re-populate labels on every read so they survive app
     /// restarts and aren't wiped when storage-sourced paths fire the delegate.
     private func enrichedAddresses() -> [SubAddress] {
-        let addresses = storage.getAllAddresses()
+        // Filter on read as well as write: rows poisoned with the null-key
+        // address by an older release must not resurface after upgrade.
+        let addresses = storage.getAllAddresses().filter { !NullKeyAddress.isNullKey($0.address) }
         for addr in addresses {
             addr.label = moneroCore.getSubaddressLabel(index: addr.index)
         }
@@ -432,7 +452,7 @@ public class Kit {
     /// - Parameter label: Optional label for the subaddress
     /// - Returns: The newly created SubAddress, or nil if creation failed
     public func createSubaddress(label: String = "") -> SubAddress? {
-        guard let result = moneroCore.addSubaddress(label: label) else {
+        guard let result = moneroCore.addSubaddress(label: label), !NullKeyAddress.isNullKey(result.address) else {
             return nil
         }
 
@@ -533,13 +553,16 @@ extension Kit: MoneroCoreDelegate {
     }
 
     func subAddresssesDidChange(subAddresses: [MoneroCore.SubAddress]) {
+        // Drop null-key addresses (a keyless wallet2 object renders them for
+        // every index) so they can never overwrite the valid rows written at
+        // Kit initialization.
+        let subAddresses = subAddresses
+            .filter { !NullKeyAddress.isNullKey($0.address) }
+            .map { SubAddress(address: $0.address, index: $0.index, label: $0.label) }
+
         if subAddresses.count == 0 {
             // Must keep at least the primary address created on Kit initialization
             return
-        }
-
-        let subAddresses = subAddresses.map {
-            SubAddress(address: $0.address, index: $0.index, label: $0.label)
         }
         storage.update(subAddresses: subAddresses)
         delegate?.subAddressesUpdated(subaddresses: subAddresses)
