@@ -46,7 +46,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MoneroKitTests",
-            dependencies: ["MoneroKit"]
+            dependencies: ["MoneroKit", "CMonero"]
         ),
     ],
     cxxLanguageStandard: .cxx11
