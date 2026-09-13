@@ -724,6 +724,13 @@ class MoneroCore {
     func coldKeyImageSync() -> Bool {
         guard let walletPtr = walletPointer else { return false }
         let result = MONERO_Wallet_coldKeyImageSync(walletPtr, 0, 0)
+        // UINT64_MAX means wallet2 threw (device timeout / BLE drop /
+        // protocol error). The exception leaves the wallet status
+        // untouched, so this sentinel is the only failure signal.
+        if result == UInt64.max {
+            NSLog("[MoneroCore] coldKeyImageSync threw inside wallet2 — device did not complete key-image sync")
+            return false
+        }
         // wallet2 returns the number of imported key images on
         // success, 0 if nothing imported (which is also valid for
         // a wallet with no transfers). Treat any non-error status
@@ -732,7 +739,6 @@ class MoneroCore {
         if status != 0 {
             return false
         }
-        _ = result
         return true
     }
 

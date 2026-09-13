@@ -2154,11 +2154,24 @@ int MONERO_Wallet_getDeviceType(void* wallet_ptr) {
     DEBUG_END()
 }
 //     virtual uint64_t coldKeyImageSync(uint64_t &spent, uint64_t &unspent) = 0;
+// Returns UINT64_MAX when wallet2 throws. WalletImpl::coldKeyImageSync has
+// no try/catch, so a device error mid key-image sync (Trezor confirmation
+// not given before the bridge timed out, BLE drop, protocol failure) came
+// out of here as a C++ exception and DEBUG_END() called std::abort() — the
+// app died with SIGABRT instead of failing the session (2026-09-12 device
+// log). The exception does not set the wallet status either, so callers
+// must check for the sentinel rather than MONERO_Wallet_status.
 uint64_t MONERO_Wallet_coldKeyImageSync(void* wallet_ptr, uint64_t spent, uint64_t unspent) {
-    DEBUG_START()
     Monero::Wallet *wallet = reinterpret_cast<Monero::Wallet*>(wallet_ptr);
-    return wallet->coldKeyImageSync(spent, unspent);
-    DEBUG_END()
+    try {
+        return wallet->coldKeyImageSync(spent, unspent);
+    } catch (const std::exception &e) {
+        std::cerr << "MONERO_Wallet_coldKeyImageSync failed: " << e.what() << std::endl;
+        return UINT64_MAX;
+    } catch (...) {
+        std::cerr << "MONERO_Wallet_coldKeyImageSync failed: unknown exception" << std::endl;
+        return UINT64_MAX;
+    }
 }
 //     virtual void deviceShowAddress(uint32_t accountIndex, uint32_t addressIndex, const std::string &paymentId) = 0;
 const char* MONERO_Wallet_deviceShowAddress(void* wallet_ptr, uint32_t accountIndex, uint32_t addressIndex) {
