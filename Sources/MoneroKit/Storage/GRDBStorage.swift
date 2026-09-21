@@ -29,13 +29,15 @@ class GrdbStorage {
         }
 
         do {
-            try migrator.migrate(dbPool)
+            try Self.migrator.migrate(dbPool)
         } catch {
             NSLog("[GrdbStorage] Migration failed: \(error)")
         }
     }
 
-    var migrator: DatabaseMigrator {
+    /// Static so tests can migrate a database part way
+    /// (`migrator.migrate(db, upTo:)`) to rebuild an older on-disk schema.
+    static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
         migrator.registerMigration("createTransactions") { db in
@@ -98,6 +100,20 @@ class GrdbStorage {
                 t.column(Balance.Columns.unlocked.name, .text).notNull()
 
                 t.primaryKey([Balance.Columns.id.name], onConflict: .replace)
+            }
+        }
+
+        // Additive: rows written before this migration read back with
+        // NULL in every new column, which `Transaction.init(row:)` maps
+        // to empty / 0. No backfill step is needed here: every refresh
+        // rewrites the whole table from wallet2 (`update(transactions:)`
+        // deletes and reinserts), so the columns fill on the first
+        // refresh after the upgrade.
+        migrator.registerMigration("addDestinationsToTransactions") { db in
+            try db.alter(table: Transaction.databaseTableName) { t in
+                t.add(column: Transaction.Columns.destinations.name, .text)
+                t.add(column: Transaction.Columns.subaddressIndices.name, .text)
+                t.add(column: Transaction.Columns.subaddressAccount.name, .integer)
             }
         }
 
