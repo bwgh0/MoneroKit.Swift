@@ -5,6 +5,22 @@ public struct Transfer {
     public let amount: UInt64
 }
 
+/// One output of an outgoing transaction: the address paid and the amount
+/// in piconero (same unit as `TransactionInfo.fee`).
+///
+/// wallet2 only knows destinations for transactions this wallet built
+/// itself (`TransactionInfo::transfers()`); they are not on chain, so an
+/// outgoing transaction seen by a wallet restored from seed has none.
+public struct TransactionDestination: Equatable, Hashable, Codable {
+    public let address: String
+    public let amount: UInt64
+
+    public init(address: String, amount: UInt64) {
+        self.address = address
+        self.amount = amount
+    }
+}
+
 public enum TransactionFilterType {
     case incoming, outgoing
 
@@ -27,7 +43,17 @@ public struct TransactionInfo {
     public let isFailed: Bool
     public let timestamp: Int
     public let memo: String?
+    /// Incoming only: the subaddress of this wallet the funds arrived on.
+    /// nil for outgoing transactions; see `destinations` for where they went.
     public let recipientAddress: String?
+    /// Outgoing destinations in wallet2 order. Empty for incoming
+    /// transactions and for outgoing ones wallet2 has no local record of.
+    public let destinations: [TransactionDestination]
+    /// Subaddress minor indices the transaction touched: the receiving
+    /// subaddresses for incoming, the spent-from subaddresses for outgoing.
+    public let subaddressIndices: [Int]
+    /// wallet2 account (major index) the transaction belongs to.
+    public let subaddressAccount: UInt32
 
     init(transaction: Transaction) {
         uid = transaction.uid
@@ -41,6 +67,9 @@ public struct TransactionInfo {
         timestamp = transaction.timestamp
         memo = transaction.note
         recipientAddress = transaction.recipientAddress
+        destinations = transaction.destinations
+        subaddressIndices = transaction.subaddressIndices
+        subaddressAccount = transaction.subaddressAccount
     }
 }
 

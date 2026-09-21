@@ -600,7 +600,10 @@ extension Kit: MoneroCoreDelegate {
                 isFailed: transaction.isFailed,
                 timestamp: Int(transaction.timestamp.timeIntervalSince1970),
                 note: transaction.note,
-                recipientAddress: recipientAddress
+                recipientAddress: recipientAddress,
+                destinations: transaction.transfers.map { TransactionDestination(address: $0.address, amount: $0.amount) },
+                subaddressIndices: transaction.subaddrIndices,
+                subaddressAccount: transaction.subaddrAccount
             )
         }
 
