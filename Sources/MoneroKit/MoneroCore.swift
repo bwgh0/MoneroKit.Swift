@@ -529,9 +529,28 @@ class MoneroCore {
         // synced) live only in memory until a store — closing without one
         // silently discards them, and tx keys are not reconstructible by a
         // rescan.
-        MONERO_WalletManager_closeWallet(wmp, wp, walletOpenedCleanly)
+        //
+        // Never let closeWallet do the store itself: WalletImpl::close(true)
+        // calls wallet2::store() with no lock while wallet2's own refresh
+        // thread may still be processing blocks, and serializing the hash
+        // chain under a concurrent mutation crashed on wallet switch during
+        // sync (SIGSEGV in do_serialize_container<deque<crypto::hash>> from
+        // close(bool)). MONERO_Wallet_store goes through WalletImpl::store,
+        // whose LOCK_REFRESH stops the in-flight cycle, takes both refresh
+        // mutexes and stores under them. Pausing first keeps LOCK_REFRESH
+        // from restarting the refresh thread when it leaves scope.
+        MONERO_Wallet_pauseRefresh(wp)
+        var stored = false
+        if walletOpenedCleanly {
+            stored = MONERO_Wallet_store(wp, cWalletPath)
+            if !stored {
+                let err = stringFromCString(MONERO_Wallet_errorString(wp)) ?? "unknown"
+                NSLog("[MoneroCore] store before close failed: \(err)")
+            }
+        }
+        MONERO_WalletManager_closeWallet(wmp, wp, false)
         let ms = Date().timeIntervalSince(t0) * 1000
-        NSLog("[MoneroCore] closeWallet returned after %.0fms (stored=\(walletOpenedCleanly))", ms)
+        NSLog("[MoneroCore] closeWallet returned after %.0fms (stored=\(stored))", ms)
         walletPointer = nil
         walletOpenedCleanly = false
     }
