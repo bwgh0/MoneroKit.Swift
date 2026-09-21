@@ -184,6 +184,38 @@ final class GrdbStorageTests: XCTestCase {
 
     /// A non-zero account round-trips and the nullable integer column
     /// still reads as 0 when written as NULL.
+    func testSetAddressTransactionsCountsWritesEveryRow() {
+        let storage = GrdbStorage(databaseFilePath: dbPath)
+        storage.update(subAddresses: [
+            SubAddress(address: "addr0", index: 0, transactionsCount: 5),
+            SubAddress(address: "addr1", index: 1, transactionsCount: 0),
+            SubAddress(address: "addr2", index: 2, transactionsCount: 3),
+        ])
+
+        storage.setAddressTransactionsCounts([1: 2, 2: 4])
+
+        let counts = Dictionary(uniqueKeysWithValues: storage.getAllAddresses().map { ($0.index, $0.transactionsCount) })
+        XCTAssertEqual(counts, [0: 0, 1: 2, 2: 4])
+        XCTAssertEqual(storage.getLastUnusedAddress()?.index, 0)
+    }
+
+    func testCarryingCountsKeepsCountsByIndex() {
+        let previous = [
+            SubAddress(address: "addr0", index: 0, transactionsCount: 1),
+            SubAddress(address: "addr1", index: 1, transactionsCount: 2),
+        ]
+        let fresh = [
+            SubAddress(address: "addr0", index: 0),
+            SubAddress(address: "addr1", index: 1),
+            SubAddress(address: "addr2", index: 2),
+        ]
+
+        let merged = SubAddress.carryingCounts(fresh, from: previous)
+
+        XCTAssertEqual(merged.map(\.transactionsCount), [1, 2, 0])
+        XCTAssertEqual(merged.map(\.index), [0, 1, 2])
+    }
+
     func testSubaddressAccountRoundTrip() throws {
         let storage = GrdbStorage(databaseFilePath: dbPath)
         let tx = Transaction(

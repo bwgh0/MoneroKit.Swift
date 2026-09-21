@@ -200,6 +200,19 @@ class GrdbStorage {
         }
     }
 
+    /// Writes the incoming-transaction count of every stored address in one
+    /// transaction; an address missing from `counts` goes back to zero.
+    func setAddressTransactionsCounts(_ counts: [Int: Int]) {
+        try? dbPool.write { db in
+            for row in try SubAddress.fetchAll(db) {
+                let count = counts[row.index] ?? 0
+                guard row.transactionsCount != count else { continue }
+                try SubAddress.filter(SubAddress.Columns.index == row.index)
+                    .updateAll(db, [SubAddress.Columns.transactionsCount.set(to: count)])
+            }
+        }
+    }
+
     func getLastUnusedAddress() -> SubAddress? {
         try? dbPool.read { db in
             try SubAddress.filter(SubAddress.Columns.transactionsCount == 0).order(SubAddress.Columns.index.desc).fetchOne(db)

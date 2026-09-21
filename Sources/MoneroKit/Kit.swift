@@ -127,8 +127,11 @@ public class Kit {
     // to it are unrecoverable. Returning "" lets the UI treat it as
     // "address unavailable" instead.
 
+    /// Highest-index address with no incoming transactions, or the primary
+    /// address when every stored address has been used.
     public var receiveAddress: String {
-        guard let address = storage.getLastUnusedAddress()?.address, !NullKeyAddress.isNullKey(address) else { return "" }
+        let candidate = storage.getLastUnusedAddress()?.address ?? storage.getAddress(index: 0)?.address
+        guard let address = candidate, !NullKeyAddress.isNullKey(address) else { return "" }
         return address
     }
 
@@ -556,9 +559,12 @@ extension Kit: MoneroCoreDelegate {
         // Drop null-key addresses (a keyless wallet2 object renders them for
         // every index) so they can never overwrite the valid rows written at
         // Kit initialization.
-        let subAddresses = subAddresses
-            .filter { !NullKeyAddress.isNullKey($0.address) }
-            .map { SubAddress(address: $0.address, index: $0.index, label: $0.label) }
+        let subAddresses = SubAddress.carryingCounts(
+            subAddresses
+                .filter { !NullKeyAddress.isNullKey($0.address) }
+                .map { SubAddress(address: $0.address, index: $0.index, label: $0.label) },
+            from: storage.getAllAddresses()
+        )
 
         if subAddresses.count == 0 {
             // Must keep at least the primary address created on Kit initialization
@@ -621,16 +627,17 @@ extension Kit: MoneroCoreDelegate {
             }
         }
 
-        for (index, txCount) in usedAddresses {
-            storage.setAddressTransactionsCount(index: index, txCount: txCount)
-        }
+        // Every row, in one write, so an address whose receives disappeared
+        // (a dropped pool transaction) goes back to zero too. Then publish the
+        // list again: the earlier `subAddresssesDidChange` went out before the
+        // history was read, so it carried the previous refresh's counts.
+        storage.setAddressTransactionsCounts(usedAddresses)
+        delegate?.subAddressesUpdated(subaddresses: enrichedAddresses())
 
-        // Generate extra unused addresses
-        if let lastUsedAddressIndex = usedAddresses.keys.max() {
-            // We assume that there's at least 2 addresses in storage. Even if there's no transactions.
-            let extraAddress = moneroCore.address(index: lastUsedAddressIndex + 1)
-            storage.add(subAddress: SubAddress(address: extraAddress, index: lastUsedAddressIndex + 1))
-        }
+        // The spare "lastUsed + 1" address that used to be inserted here lived
+        // only in this database: wallet2 never knew it, and the next refresh
+        // replaced the table and dropped it. Apps derive fresh addresses with
+        // `createSubaddress()` instead.
     }
 }
 
