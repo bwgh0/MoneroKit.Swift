@@ -18,6 +18,18 @@ public class SubAddress: Record {
         super.init()
     }
 
+    /// Returns `fresh` with each `transactionsCount` copied from the entry in
+    /// `previous` with the same index. wallet2 republishes the address table
+    /// before the history is re-read, so without this every refresh zeroed the
+    /// counts until the next cold start.
+    static func carryingCounts(_ fresh: [SubAddress], from previous: [SubAddress]) -> [SubAddress] {
+        let counts = Dictionary(previous.map { ($0.index, $0.transactionsCount) }, uniquingKeysWith: max)
+        for address in fresh {
+            address.transactionsCount = counts[address.index] ?? 0
+        }
+        return fresh
+    }
+
     override open class var databaseTableName: String {
         "SubAddresss"
     }
