@@ -62,7 +62,10 @@ class SyncStateManager {
         self.restoreHeight = restoreHeight
 
         self.queue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_state_queue", qos: .userInitiated)
-        self.workerQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_worker_queue", qos: .background)
+        // Utility, not background: this poll reports the daemon height and
+        // sync progress on screen, and background work starves on a busy
+        // CPU (see `Kit.lifecycleQueue`).
+        self.workerQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_worker_queue", qos: .utility)
         queue.setSpecific(key: Self.queueKey, value: true)
 
         reachabilityManager.$isReachable
