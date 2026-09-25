@@ -7,7 +7,14 @@ public class Kit {
     private let moneroCore: MoneroCore
     private let storage: GrdbStorage
     private let kitId = UUID().uuidString
-    private let lifecycleQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.kit_lifecycle_queue", qos: .background)
+    /// Opens, connects, stops and sends run here, and the user waits on
+    /// each of them, so user-initiated. At `.background` the wallet open
+    /// and wallet2's daemon init (which generates a 4096-bit RSA key for
+    /// its TLS context) starved whenever the CPU was busy: a new wallet sat
+    /// on "Connecting" with no address for a minute or more. wallet2's own
+    /// refresh and scan threads are plain pthreads at default QoS and are
+    /// not affected by this value.
+    private let lifecycleQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.kit_lifecycle_queue", qos: .userInitiated)
     private var started = false
 
     public weak var delegate: MoneroKitDelegate?
