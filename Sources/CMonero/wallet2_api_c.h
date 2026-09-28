@@ -979,7 +979,15 @@ extern ADDAPI bool MONERO_WalletManager_startMining(void* wm_ptr, const char* ad
 //     virtual bool stopMining() = 0;
 extern ADDAPI bool MONERO_WalletManager_stopMining(void* wm_ptr, const char* address);
 //     virtual std::string resolveOpenAlias(const std::string &address, bool &dnssec_valid) const = 0;
-extern ADDAPI const char* MONERO_WalletManager_resolveOpenAlias(void* wm_ptr, const char* address, bool dnssec_valid);
+// Resolves an OpenAlias name with the wallet2 resolver. Sets *dnssec_valid
+// (NULL is allowed). Returns a malloc'd string (free with MONERO_free), empty
+// when nothing resolved, or NULL after an exception. Blocks with no time limit.
+extern ADDAPI const char* MONERO_WalletManager_resolveOpenAlias(void* wm_ptr, const char* address, bool* dnssec_valid);
+
+// DNSSEC-validating TXT lookup through a DNS-over-TCP forwarder on the IPv4
+// loopback. Returns malloc'd JSON (free with MONERO_free), or NULL after an
+// exception. See openalias_lookup.hpp.
+extern ADDAPI const char* MONERO_OpenAlias_lookupTXT(const char* name, int forwarder_port, int timeout_ms);
 //     static std::tuple<bool, std::string, std::string, std::string, std::string> checkUpdates(
 //         const std::string &software,
 //         std::string subdir,

@@ -13,6 +13,7 @@
 #include <thread>
 #include "wallet2_api.h"
 #include "monero_checksum.h"
+#include "openalias_lookup.hpp"
 
 #ifdef __cplusplus
 extern "C"
@@ -2505,15 +2506,38 @@ bool MONERO_WalletManager_stopMining(void* wm_ptr, const char* address) {
     DEBUG_END()
 }
 //     virtual std::string resolveOpenAlias(const std::string &address, bool &dnssec_valid) const = 0;
-const char* MONERO_WalletManager_resolveOpenAlias(void* wm_ptr, const char* address, bool dnssec_valid) {
-    DEBUG_START()
-    Monero::WalletManager *wm = reinterpret_cast<Monero::WalletManager*>(wm_ptr);
-    std::string str = wm->resolveOpenAlias(std::string(address), dnssec_valid);
-    const std::string::size_type size = str.size();
-    char *buffer = new char[size + 1];   //we need extra char for NUL
-    memcpy(buffer, str.c_str(), size + 1);
+namespace {
+// MONERO_free calls free(), so strings for Swift must come from malloc.
+const char* openalias_malloc_copy(const std::string& s) {
+    char* buffer = static_cast<char*>(malloc(s.size() + 1));
+    if (buffer == nullptr) return nullptr;
+    memcpy(buffer, s.c_str(), s.size() + 1);
     return buffer;
-    DEBUG_END()
+}
+}  // namespace
+
+const char* MONERO_WalletManager_resolveOpenAlias(void* wm_ptr, const char* address, bool* dnssec_valid) {
+    if (dnssec_valid != nullptr) *dnssec_valid = false;
+    if (wm_ptr == nullptr || address == nullptr) return nullptr;
+    try {
+        Monero::WalletManager* wm = reinterpret_cast<Monero::WalletManager*>(wm_ptr);
+        bool valid = false;
+        const std::string resolved = wm->resolveOpenAlias(std::string(address), valid);
+        if (dnssec_valid != nullptr) *dnssec_valid = valid;
+        return openalias_malloc_copy(resolved);
+    } catch (...) {
+        if (dnssec_valid != nullptr) *dnssec_valid = false;
+        return nullptr;
+    }
+}
+
+const char* MONERO_OpenAlias_lookupTXT(const char* name, int forwarder_port, int timeout_ms) {
+    try {
+        const std::string input = name != nullptr ? std::string(name) : std::string();
+        return openalias_malloc_copy(openalias::lookup_txt_json(input, forwarder_port, timeout_ms));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 // WalletManagerFactory

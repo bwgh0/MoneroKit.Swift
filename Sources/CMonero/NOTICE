@@ -23,6 +23,9 @@ Separately, wallet2_api.h is part of the Monero core project
 (https://github.com/monero-project/monero) and is licensed under the
 BSD-3-Clause license; its original copyright header is retained in the file.
 
+unbound.h is copied from unbound 1.16.2 (BSD-3-Clause, Copyright (c) 2007
+NLnet Labs); the license text is in the file header.
+
 The prebuilt static library Monero.xcframework/**/libMoneroCombined.a links
 the LGPL-3.0 monero_c code. Its corresponding source and the scripts used to
 build it are at https://github.com/bwgh0/monero_c (see BUILDING-MONEROONE.md).
