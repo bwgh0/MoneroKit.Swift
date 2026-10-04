@@ -113,6 +113,10 @@ class MoneroCore {
         walletListener.onNewTransaction = { [weak self] in
             self?.startStateManager()
         }
+
+        walletListener.onNewBlock = { [weak self] in
+            self?.startStateManager()
+        }
     }
 
     deinit {
@@ -365,7 +369,10 @@ class MoneroCore {
         case .connecting, .notSynced: ()
 
         case .synced:
-            stateManager.stop()
+            // Stop polling only. `stop()` here also paused wallet2's refresh
+            // and cleared this callback, so an open synced wallet never saw
+            // another block and its confirmations froze.
+            stateManager.stopPolling()
             refreshQueue.async { [weak self] in
                 self?.refresh()
                 self?.stateManager.walletStored()

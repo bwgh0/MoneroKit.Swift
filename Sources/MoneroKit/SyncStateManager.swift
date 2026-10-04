@@ -32,6 +32,8 @@ class SyncStateManager {
     private var daemonHeight: UInt64 = 0
     private(set) var walletHeight: UInt64 = 0
     private(set) var blockHeights: (UInt64, UInt64)?
+    /// Wallet height of the last `.synced` report; nil after `start()`.
+    private var reportedSyncedHeight: UInt64?
 
     var onSyncStateChanged: (() -> Void)?
 
@@ -189,7 +191,22 @@ class SyncStateManager {
             hasConnectedOnce = true
         }
 
-        state = evaluateState()
+        let newState = evaluateState()
+        if Self.reportsSyncedAgain(current: state, new: newState, walletHeight: walletHeight, reportedSyncedHeight: reportedSyncedHeight) {
+            onSyncStateChanged?()
+        }
+        if newState == .synced {
+            reportedSyncedHeight = walletHeight
+        }
+        state = newState
+    }
+
+    /// True when a check finds the wallet still synced but at a height not
+    /// yet reported. `state` stays `.synced` from one block to the next, so
+    /// its didSet reports nothing, and without this report new blocks never
+    /// reach the delegate: heights, confirmations and history freeze.
+    static func reportsSyncedAgain(current: WalletState, new: WalletState, walletHeight: UInt64, reportedSyncedHeight: UInt64?) -> Bool {
+        current == .synced && new == .synced && walletHeight != reportedSyncedHeight
     }
 
     private func scheduleNextCheck() {
@@ -225,6 +242,9 @@ class SyncStateManager {
         self.walletPointer = walletPointer
         self.cWalletPassword = cWalletPassword
         connectStartTime = Date()
+        // A restart comes from a new block, a new transaction or a manual
+        // refresh: report the synced state once more even at the same height.
+        reportedSyncedHeight = nil
 
 //        if !backgroundSyncSetupSuccess {
 //            backgroundSyncSetupSuccess = MONERO_Wallet_setupBackgroundSync(walletPointer, BackgroundSyncType.customPassword.rawValue, cWalletPassword, "")
@@ -246,6 +266,18 @@ class SyncStateManager {
 //        }
 
         scheduleNextCheck()
+    }
+
+    /// Stop polling once the wallet is synced. Unlike `stop()`, wallet2's
+    /// refresh thread keeps running and `onSyncStateChanged` stays set, so
+    /// the wallet listener can restart polling when wallet2 adds a block or
+    /// finds a transaction.
+    func stopPolling() {
+        timerLock.lock()
+        isRunning = false
+        timer?.cancel()
+        timer = nil
+        timerLock.unlock()
     }
 
     /// Pause polling without destroying state — sync can resume via start()
