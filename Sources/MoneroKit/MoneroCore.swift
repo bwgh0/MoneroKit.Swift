@@ -53,13 +53,15 @@ class MoneroCore {
         }
     }
 
-    private var balance: Balance = .init(all: 0, unlocked: 0) {
+    /// nil until the first read after the wallet opens, so that read always
+    /// publishes. Until then the app shows the balance stored by the last
+    /// run; a wallet emptied elsewhere reads 0, and a default of 0 here hid
+    /// that change and kept the stale balance on screen.
+    private var balance: Balance? {
         didSet {
             globalEventQueue.async { [weak self] in
-                guard let self else { return }
-                if oldValue != balance {
-                    delegate?.balanceDidChange(balance: balance)
-                }
+                guard let self, let balance, oldValue != balance else { return }
+                delegate?.balanceDidChange(balance: balance)
             }
         }
     }
@@ -106,6 +108,13 @@ class MoneroCore {
         walletListener = WalletListener()
         walletManagerPointer = MONERO_WalletManagerFactory_getWalletManager()
 
+        bindCallbacks()
+    }
+
+    /// Connect the state manager and wallet listener events to this core.
+    /// `stopWalletServices()` clears them, so no callback runs against a
+    /// closed wallet.
+    private func bindCallbacks() {
         stateManager.onSyncStateChanged = { [weak self] in
             self?.onSyncStateChanged()
         }
@@ -387,7 +396,16 @@ class MoneroCore {
             }
 
         case let .idle(daemonReachable):
-            daemonReachable ? startWalletServices() : stopWalletServices()
+            if daemonReachable {
+                startWalletServices()
+            } else {
+                stopWalletServices()
+                // The wallet stays open while the network is down. Bind the
+                // callbacks again, or the .idle(daemonReachable: true) of the
+                // returning network never reaches this switch and the wallet
+                // never syncs again.
+                bindCallbacks()
+            }
         }
     }
 
