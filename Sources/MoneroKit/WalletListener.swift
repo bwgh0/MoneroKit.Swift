@@ -6,10 +6,12 @@ class WalletListener {
     private var walletPointer: UnsafeMutableRawPointer?
     private var isRunning = false
     private var lockedBalanceBlockHeight: UInt64?
+    private var lastBlockHeight: UInt64 = 0
     private let listenerQueue = DispatchQueue(label: "monero.kit.wallet-listener-queue", qos: .userInitiated)
     private var timer: DispatchSourceTimer?
     private let timerLock = NSLock()
     var onNewTransaction: (() -> Void)?
+    var onNewBlock: (() -> Void)?
 
     private func checkListener() {
         timerLock.lock()
@@ -24,6 +26,15 @@ class WalletListener {
             // Has new transaction
             onNewTransaction?()
             MONERO_cw_WalletListener_resetIsNewTransactionExist(listenerPtr)
+        }
+
+        // wallet2's refresh thread reports each block it adds. A synced
+        // wallet stops polling its state, so a new block restarts the poll
+        // to publish the new height and confirmations.
+        let blockHeight = MONERO_cw_WalletListener_height(listenerPtr)
+        if blockHeight != lastBlockHeight {
+            lastBlockHeight = blockHeight
+            onNewBlock?()
         }
 
         if let height = lockedBalanceBlockHeight {
@@ -76,6 +87,7 @@ class WalletListener {
         timerLock.unlock()
 
         onNewTransaction = nil
+        onNewBlock = nil
         walletListenerPointer = nil
 
         if let walletPointer {
