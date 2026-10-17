@@ -38,6 +38,8 @@ public struct TransactionInfo {
     public let type: TransactionType
     public let blockHeight: UInt64
     public let amount: Int64
+    /// Fee in piconero. 0 means unknown, as for a pre-RingCT transaction
+    /// with inputs from another wallet.
     public let fee: UInt64
     public let isPending: Bool
     public let isFailed: Bool

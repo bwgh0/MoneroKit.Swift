@@ -15,6 +15,7 @@ class Transaction: Record {
     var type: TransactionType
     var blockHeight: UInt64
     var amount: Int64
+    /// Fee in piconero. 0 means unknown (see `knownFee`).
     var fee: UInt64
     var isPending: Bool
     var isFailed: Bool
@@ -40,7 +41,7 @@ class Transaction: Record {
         self.type = type
         self.blockHeight = blockHeight
         self.amount = amount
-        self.fee = fee
+        self.fee = Transaction.knownFee(fee)
         self.isPending = isPending
         self.isFailed = isFailed
         self.timestamp = timestamp
@@ -97,13 +98,28 @@ class Transaction: Record {
         try super.init(row: row)
     }
 
+    /// wallet2 computes a fee as inputs minus outputs in unsigned
+    /// arithmetic, and it counts only the inputs this wallet owns and has
+    /// key images for. When a pre-RingCT (version 1) transaction has other
+    /// inputs (every payment from another wallet, and in a view-only
+    /// wallet its own spends too), the result wraps to just under 2^64.
+    /// Real fees stay far below Int64.max (9.2 million XMR), so a larger
+    /// value means an unknown fee, which this model stores as 0.
+    static func knownFee(_ fee: UInt64) -> UInt64 {
+        fee > UInt64(Int64.max) ? 0 : fee
+    }
+
     override open func encode(to container: inout PersistenceContainer) throws {
         container[Columns.uid] = uid
         container[Columns.hash] = hash
         container[Columns.type] = type
-        container[Columns.blockHeight] = blockHeight
+        // SQLite integers are signed 64-bit. GRDB traps on a UInt64 above
+        // Int64.max, and a trap goes straight through the `try?` around
+        // the write. Real heights stay far below that limit, so clamping
+        // keeps their order.
+        container[Columns.blockHeight] = Int64(clamping: blockHeight)
         container[Columns.amount] = amount
-        container[Columns.fee] = fee
+        container[Columns.fee] = Int64(Transaction.knownFee(fee))
         container[Columns.isPending] = isPending
         container[Columns.isFailed] = isFailed
         container[Columns.timestamp] = timestamp
