@@ -109,6 +109,15 @@ class Transaction: Record {
         fee > UInt64(Int64.max) ? 0 : fee
     }
 
+    /// Whole seconds since 1970, clamped to `Int`. A block's timestamp
+    /// comes from the node, so a bad node can send any 64-bit value, and
+    /// `Int(_: Double)` traps on a value out of range. Real timestamps
+    /// stay far below the limit, so clamping keeps their order.
+    static func unixTime(_ date: Date) -> Int {
+        let seconds = date.timeIntervalSince1970.rounded(.towardZero)
+        return Int(exactly: seconds) ?? (seconds < 0 ? .min : .max)
+    }
+
     override open func encode(to container: inout PersistenceContainer) throws {
         container[Columns.uid] = uid
         container[Columns.hash] = hash
