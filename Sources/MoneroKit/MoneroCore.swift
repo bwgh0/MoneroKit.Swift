@@ -14,7 +14,21 @@ class MoneroCore {
     private var walletListener: WalletListener
     private var networkType: NetworkType = .mainnet
     private var walletManagerPointer: UnsafeMutableRawPointer?
-    private var walletPointer: UnsafeMutableRawPointer?
+    private var walletPointer: UnsafeMutableRawPointer? {
+        didSet { walletGeneration = Self.nextWalletGeneration() }
+    }
+    /// Changes on every wallet open and close, unique across every kit in
+    /// the process (a new kit for the same wallet never reuses one). A
+    /// `PreparedTransaction` commits only in the open it was signed in.
+    private var walletGeneration = MoneroCore.nextWalletGeneration()
+    private static let walletGenerationLock = NSLock()
+    private static var lastWalletGeneration = 0
+    private static func nextWalletGeneration() -> Int {
+        walletGenerationLock.lock()
+        defer { walletGenerationLock.unlock() }
+        lastWalletGeneration &+= 1
+        return lastWalletGeneration
+    }
     /// True once the wallet opened/recovered with status == 0. Gates the
     /// store-on-close in `stopCore()`: a wallet that never opened cleanly
     /// (corrupt cache, unreachable hardware device) must not serialize its
@@ -886,7 +900,8 @@ class MoneroCore {
         return true
     }
 
-    func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String? = nil) throws {
+    /// Signs a transaction and returns it unbroadcast, with its final txids.
+    func prepareSend(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String? = nil) throws -> PreparedTransaction {
         guard let walletPtr = walletPointer else {
             NSLog("[MoneroCore] send: walletPointer is nil")
             throw MoneroCoreError.walletNotInitialized
@@ -917,13 +932,45 @@ class MoneroCore {
             throw MoneroCoreError.match(txError) ?? MoneroCoreError.transactionSendFailed(txError)
         }
 
-        if let memo {
-            let txIds = String(cString: MONERO_PendingTransaction_txid(pendingTxPtr, "|"))
-            let txId = txIds.split(separator: "|").first ?? ""
-            let cTxId = (txId as NSString).utf8String
-            let cNote = (memo as NSString).utf8String
+        let txids = (stringFromCString(MONERO_PendingTransaction_txid(txPtr, "|")) ?? "")
+            .split(separator: "|").map(String.init).filter { !$0.isEmpty }
+        guard !txids.isEmpty else {
+            NSLog("[MoneroCore] send: signed transaction has no txid, failing")
+            throw MoneroCoreError.transactionSendFailed("Signed transaction has no txid")
+        }
+        return PreparedTransaction(
+            txids: txids,
+            amount: MONERO_PendingTransaction_amount(txPtr),
+            fee: MONERO_PendingTransaction_fee(txPtr),
+            pointer: txPtr,
+            walletGeneration: walletGeneration,
+            memo: memo
+        )
+    }
 
-            MONERO_Wallet_setUserNote(walletPtr, cTxId, cNote)
+    /// The transaction from `prepareSend` can still be committed: the
+    /// wallet open it was signed in is still open, and it was not sent.
+    func isPrepared(_ prepared: PreparedTransaction) -> Bool {
+        walletPointer != nil && prepared.walletGeneration == walletGeneration && !prepared.isUsed
+    }
+
+    /// Broadcasts a transaction from `prepareSend`. Throws
+    /// `walletNotInitialized`, with nothing sent, when the wallet it was
+    /// signed in has closed, and `transactionSendFailed` when it was
+    /// committed before.
+    func commit(_ prepared: PreparedTransaction) throws {
+        guard let walletPtr = walletPointer, prepared.walletGeneration == walletGeneration else {
+            NSLog("[MoneroCore] send: the wallet closed after signing, nothing sent")
+            throw MoneroCoreError.walletNotInitialized
+        }
+        guard !prepared.isUsed else {
+            throw MoneroCoreError.transactionSendFailed("Transaction already sent")
+        }
+        prepared.isUsed = true
+        let txPtr = prepared.pointer
+
+        if let memo = prepared.memo, let txId = prepared.txids.first {
+            MONERO_Wallet_setUserNote(walletPtr, (txId as NSString).utf8String, (memo as NSString).utf8String)
         }
 
         NSLog("[MoneroCore] send: committing transaction...")
@@ -954,6 +1001,13 @@ class MoneroCore {
         storeWallet(walletPointer: walletPtr)
 
         startStateManager()
+    }
+
+    @discardableResult
+    func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String? = nil) throws -> PreparedTransaction {
+        let prepared = try prepareSend(to: address, amount: amount, priority: priority, memo: memo)
+        try commit(prepared)
+        return prepared
     }
 
     func estimateFee(address: String, amount: SendAmount, priority: SendPriority = .default) throws -> UInt64 {
