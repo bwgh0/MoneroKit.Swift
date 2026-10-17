@@ -362,7 +362,30 @@ class MoneroCore {
         }
         NSLog("[MoneroCore] Wallet initialized successfully with daemon, self=\(Unmanaged.passUnretained(self).toOpaque())")
 
+        // wallet2 reads a wallet with no synced blocks (a cache stored
+        // before the first sync, e.g. the app was killed during a
+        // restore) as a brand new wallet, and init moves its refresh
+        // height to the daemon tip. The scan then starts at the tip and
+        // misses every earlier transaction. Put the saved restore height
+        // back before the refresh thread starts.
+        let chainHeight = MONERO_Wallet_blockChainHeight(walletPtr)
+        let refreshHeight = MONERO_Wallet_getRefreshFromBlockHeight(walletPtr)
+        if let height = Self.refreshHeightAfterInit(blockChainHeight: chainHeight, refreshHeight: refreshHeight, restoreHeight: restoreHeight) {
+            NSLog("[MoneroCore] Wallet has no synced blocks, refresh height %llu moved by init, restoring %llu", refreshHeight, height)
+            logger?.info("Wallet has no synced blocks: restored the refresh height \(height) (init set \(refreshHeight))")
+            MONERO_Wallet_setRefreshFromBlockHeight(walletPtr, height)
+        }
+
         MONERO_Wallet_setTrustedDaemon(walletPtr, node.isTrusted)
+    }
+
+    /// The refresh height to set after `MONERO_Wallet_init`, or nil when
+    /// init left it alone. A wallet whose cache holds at most the genesis
+    /// block scans from its saved restore height, never from the tip that
+    /// wallet2's new-wallet rule picks.
+    static func refreshHeightAfterInit(blockChainHeight: UInt64, refreshHeight: UInt64, restoreHeight: UInt64) -> UInt64? {
+        guard blockChainHeight <= 1, refreshHeight != restoreHeight else { return nil }
+        return restoreHeight
     }
 
     private func onSyncStateChanged() {
