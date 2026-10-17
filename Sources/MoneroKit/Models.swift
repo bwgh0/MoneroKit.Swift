@@ -172,6 +172,8 @@ public final class PreparedTransaction: @unchecked Sendable {
     /// Piconero to the destinations, without the change and the fee.
     public let amount: UInt64
     public let fee: UInt64
+    /// The address it pays.
+    public let address: String
 
     let pointer: UnsafeMutableRawPointer
     /// The wallet open this transaction was signed in. A commit after the
@@ -181,10 +183,11 @@ public final class PreparedTransaction: @unchecked Sendable {
     /// Set by the first commit. Read and written on the kit's lifecycle queue.
     var isUsed = false
 
-    init(txids: [String], amount: UInt64, fee: UInt64, pointer: UnsafeMutableRawPointer, walletGeneration: Int, memo: String?) {
+    init(txids: [String], amount: UInt64, fee: UInt64, address: String, pointer: UnsafeMutableRawPointer, walletGeneration: Int, memo: String?) {
         self.txids = txids
         self.amount = amount
         self.fee = fee
+        self.address = address
         self.pointer = pointer
         self.walletGeneration = walletGeneration
         self.memo = memo

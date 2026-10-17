@@ -942,6 +942,7 @@ class MoneroCore {
             txids: txids,
             amount: MONERO_PendingTransaction_amount(txPtr),
             fee: MONERO_PendingTransaction_fee(txPtr),
+            address: address,
             pointer: txPtr,
             walletGeneration: walletGeneration,
             memo: memo
