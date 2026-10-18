@@ -162,7 +162,39 @@ public enum WalletStateError: Error, Equatable {
     }
 }
 
-public enum SendAmount {
+/// A transaction wallet2 has signed and not broadcast yet. Its txids are
+/// final before the broadcast: save them first, then call
+/// `Kit.commit(_:)`, so a broadcast whose result never comes back can
+/// still be found by txid. Commit it at most once.
+public final class PreparedTransaction: @unchecked Sendable {
+    /// One txid per transaction (wallet2 can split a large send).
+    public let txids: [String]
+    /// Piconero to the destinations, without the change and the fee.
+    public let amount: UInt64
+    public let fee: UInt64
+    /// The address it pays.
+    public let address: String
+
+    let pointer: UnsafeMutableRawPointer
+    /// The wallet open this transaction was signed in. A commit after the
+    /// wallet closed (or opened again) never touches the old pointer.
+    let walletGeneration: Int
+    let memo: String?
+    /// Set by the first commit. Read and written on the kit's lifecycle queue.
+    var isUsed = false
+
+    init(txids: [String], amount: UInt64, fee: UInt64, address: String, pointer: UnsafeMutableRawPointer, walletGeneration: Int, memo: String?) {
+        self.txids = txids
+        self.amount = amount
+        self.fee = fee
+        self.address = address
+        self.pointer = pointer
+        self.walletGeneration = walletGeneration
+        self.memo = memo
+    }
+}
+
+public enum SendAmount: Sendable {
     case value(Int)
     case all
 

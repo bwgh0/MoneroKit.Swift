@@ -16,6 +16,16 @@ public class Kit {
     /// not affected by this value.
     private let lifecycleQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.kit_lifecycle_queue", qos: .userInitiated)
     private var started = false
+    /// Set by `stop()` / `stopAsync()` before they queue, cleared by
+    /// `start()`. `_start` waits on `lifecycleQueue` while another kit
+    /// holds the one running slot, so a stop queued behind it would wait
+    /// for that kit to stop first. The flag ends the wait at once.
+    private let stopLock = NSLock()
+    private var stopRequestedFlag = false
+    private var stopRequested: Bool {
+        get { stopLock.withLock { stopRequestedFlag } }
+        set { stopLock.withLock { stopRequestedFlag = newValue } }
+    }
 
     public weak var delegate: MoneroKitDelegate?
 
@@ -224,6 +234,12 @@ public class Kit {
         var kitState = KitManager.shared.checkAndGetInitialState(kitId: kitId)
 
         while kitState == .waiting {
+            if stopRequested {
+                // Stopped while it waited for the slot: it never ran.
+                KitManager.shared.removeWaiting(kitId: kitId)
+                started = false
+                return
+            }
             moneroCore.setConnectingState(waiting: true)
             Thread.sleep(forTimeInterval: 1.0)
             kitState = KitManager.shared.checkAndGetState(kitId: kitId)
@@ -280,6 +296,7 @@ public class Kit {
     }
 
     public func start() {
+        stopRequested = false
         // Use strong self to prevent deallocation during async startup
         // The Kit MUST remain alive while wallet2 is initializing
         lifecycleQueue.async { [self] in self._start() }
@@ -324,6 +341,7 @@ public class Kit {
     }
 
     public func stop() {
+        stopRequested = true
         lifecycleQueue.async { [weak self] in self?._stop() }
     }
 
@@ -334,6 +352,7 @@ public class Kit {
     /// previous wallet's C++ side is fully torn down. The fire-and-forget
     /// `stop()` returns immediately and races whatever you do next.
     public func stopAsync() async {
+        stopRequested = true
         await withCheckedContinuation { continuation in
             lifecycleQueue.async { [weak self] in
                 self?._stop()
@@ -389,26 +408,52 @@ public class Kit {
         }
     }
 
-    public func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws {
+    /// Signs and broadcasts. Returns the sent transaction with its txids.
+    @discardableResult
+    public func send(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws -> PreparedTransaction {
         // Serialize through `lifecycleQueue` so the inline
         // `fetchTransactions` + `updateBalance` that `MoneroCore.send`
         // now performs after commit (so callers can immediately read
         // the just-broadcast tx) doesn't race a concurrent refresh
         // or estimateFee on the same wallet pointer.
-        var result: Result<Void, Error>!
+        try onLifecycleQueue { try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo) }
+    }
+
+    /// Signs a transaction and returns it unbroadcast. Its txids are final:
+    /// save them, then call `commit(_:)`. Nothing reaches the network until
+    /// the commit, and a transaction that is never committed is dropped.
+    /// A hardware wallet signs on the device here.
+    public func prepareSend(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String?) throws -> PreparedTransaction {
+        try onLifecycleQueue { try moneroCore.prepareSend(to: address, amount: amount, priority: priority, memo: memo) }
+    }
+
+    /// Broadcasts a transaction from `prepareSend(to:amount:priority:memo:)`.
+    /// Throws `MoneroCoreError.walletNotInitialized`, with nothing sent,
+    /// when the wallet closed after signing, and
+    /// `MoneroCoreError.transactionCommitFailed` when the broadcast failed
+    /// or its result is not known.
+    public func commit(_ prepared: PreparedTransaction) throws {
+        try onLifecycleQueue { try moneroCore.commit(prepared) }
+    }
+
+    /// The transaction from `prepareSend(to:amount:priority:memo:)` can
+    /// still be committed: the wallet it was signed in is still open in
+    /// this kit, and it was not sent. False once the wallet closed or
+    /// opened again, or the kit stopped.
+    public func isPrepared(_ prepared: PreparedTransaction) -> Bool {
+        (try? onLifecycleQueue { moneroCore.isPrepared(prepared) }) ?? false
+    }
+
+    private func onLifecycleQueue<T>(_ work: () throws -> T) throws -> T {
+        var result: Result<T, Error>!
         lifecycleQueue.sync {
             guard KitManager.shared.isRunning(kitId: self.kitId) else {
                 result = .failure(MoneroCoreError.walletNotInitialized)
                 return
             }
-            do {
-                try moneroCore.send(to: address, amount: amount, priority: priority, memo: memo)
-                result = .success(())
-            } catch {
-                result = .failure(error)
-            }
+            result = Result { try work() }
         }
-        try result.get()
+        return try result.get()
     }
 
     public func estimateFee(address: String, amount: SendAmount, priority: SendPriority = .default) throws -> UInt64 {
