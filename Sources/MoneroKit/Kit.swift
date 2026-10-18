@@ -16,6 +16,16 @@ public class Kit {
     /// not affected by this value.
     private let lifecycleQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.kit_lifecycle_queue", qos: .userInitiated)
     private var started = false
+    /// Set by `stop()` / `stopAsync()` before they queue, cleared by
+    /// `start()`. `_start` waits on `lifecycleQueue` while another kit
+    /// holds the one running slot, so a stop queued behind it would wait
+    /// for that kit to stop first. The flag ends the wait at once.
+    private let stopLock = NSLock()
+    private var stopRequestedFlag = false
+    private var stopRequested: Bool {
+        get { stopLock.withLock { stopRequestedFlag } }
+        set { stopLock.withLock { stopRequestedFlag = newValue } }
+    }
 
     public weak var delegate: MoneroKitDelegate?
 
@@ -224,6 +234,12 @@ public class Kit {
         var kitState = KitManager.shared.checkAndGetInitialState(kitId: kitId)
 
         while kitState == .waiting {
+            if stopRequested {
+                // Stopped while it waited for the slot: it never ran.
+                KitManager.shared.removeWaiting(kitId: kitId)
+                started = false
+                return
+            }
             moneroCore.setConnectingState(waiting: true)
             Thread.sleep(forTimeInterval: 1.0)
             kitState = KitManager.shared.checkAndGetState(kitId: kitId)
@@ -280,6 +296,7 @@ public class Kit {
     }
 
     public func start() {
+        stopRequested = false
         // Use strong self to prevent deallocation during async startup
         // The Kit MUST remain alive while wallet2 is initializing
         lifecycleQueue.async { [self] in self._start() }
@@ -324,6 +341,7 @@ public class Kit {
     }
 
     public func stop() {
+        stopRequested = true
         lifecycleQueue.async { [weak self] in self?._stop() }
     }
 
@@ -334,6 +352,7 @@ public class Kit {
     /// previous wallet's C++ side is fully torn down. The fire-and-forget
     /// `stop()` returns immediately and races whatever you do next.
     public func stopAsync() async {
+        stopRequested = true
         await withCheckedContinuation { continuation in
             lifecycleQueue.async { [weak self] in
                 self?._stop()

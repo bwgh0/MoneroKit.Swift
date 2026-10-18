@@ -50,6 +50,15 @@ class KitManager {
         }
     }
 
+    /// A kit that waited for the slot stopped before it got it.
+    func removeWaiting(kitId: String) {
+        queue.sync {
+            if waitingKitId == kitId {
+                waitingKitId = nil
+            }
+        }
+    }
+
     func removeRunning(kitId: String) {
         queue.sync {
             if runningKitId == kitId {
