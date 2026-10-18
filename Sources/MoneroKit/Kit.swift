@@ -603,7 +603,9 @@ extension Kit: MoneroCoreDelegate {
         guard started else { return }
 
         if let (walletHeight, daemonHeight) = moneroCore.blockHeights {
-            storage.update(blockHeights: BlockHeights(daemonHeight: Int(daemonHeight), walletHeight: Int(walletHeight)))
+            // The node reports the daemon height. `SyncStateManager` drops
+            // impossible values, and the clamp keeps this write safe as well.
+            storage.update(blockHeights: BlockHeights(daemonHeight: Int(clamping: daemonHeight), walletHeight: Int(walletHeight)))
         }
     }
 
@@ -656,7 +658,7 @@ extension Kit: MoneroCoreDelegate {
                 fee: transaction.fee,
                 isPending: transaction.isPending,
                 isFailed: transaction.isFailed,
-                timestamp: Int(transaction.timestamp.timeIntervalSince1970),
+                timestamp: Transaction.unixTime(transaction.timestamp),
                 note: transaction.note,
                 recipientAddress: recipientAddress,
                 destinations: transaction.transfers.map { TransactionDestination(address: $0.address, amount: $0.amount) },

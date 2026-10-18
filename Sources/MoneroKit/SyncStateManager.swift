@@ -6,6 +6,17 @@ import HsToolKit
 class SyncStateManager {
     static let storeBlocksCount: UInt64 = 2000
     static let connectTimeout: TimeInterval = 30
+    /// CRYPTONOTE_MAX_BLOCK_NUMBER in Monero's cryptonote_config.h.
+    static let maxBlockHeight: UInt64 = 500_000_000
+
+    /// The node reports the daemon height, so a bad node can send any
+    /// 64-bit value. The progress math, the stored heights and apps that
+    /// count confirmations convert it to `Int`, which traps above
+    /// `Int.max`. No Monero height can pass `maxBlockHeight`, so a larger
+    /// value counts as no height (0), as when the height request fails.
+    static func usableDaemonHeight(_ height: UInt64) -> UInt64 {
+        height <= maxBlockHeight ? height : 0
+    }
 
     private var cancellables = Set<AnyCancellable>()
     private var reachabilityManager: ReachabilityManager
@@ -185,9 +196,9 @@ class SyncStateManager {
             lastStoredBlockHeight = walletHeight
         }
 
-        self.daemonHeight = daemonHeight
+        self.daemonHeight = Self.usableDaemonHeight(daemonHeight)
 
-        if daemonHeight > 0 && !hasConnectedOnce {
+        if self.daemonHeight > 0 && !hasConnectedOnce {
             hasConnectedOnce = true
         }
 
