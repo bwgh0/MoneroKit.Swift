@@ -294,7 +294,11 @@ class MoneroCore {
             )
 
         case let .legacy(mnemonic, passphrase):
-            let seed = mnemonic.joined(separator: " ").decomposedStringWithCompatibilityMapping
+            // NFC: wallet2 matches words byte for byte against its NFC word
+            // lists. NFKD split accented, umlauted, dakuten and й/ё letters,
+            // so Spanish, German, Japanese and Russian restores with such a
+            // word failed.
+            let seed = mnemonic.joined(separator: " ").precomposedStringWithCanonicalMapping
 
             recoveredWalletPtr = MONERO_WalletManager_recoveryWallet(
                 walletManagerPointer,
@@ -1081,7 +1085,8 @@ extension MoneroCore {
             resolvedPassphrase = ""
 
         case let .legacy(mnemonic, passphrase):
-            resolvedSeedPhrase = mnemonic.joined(separator: " ").decomposedStringWithCompatibilityMapping
+            // NFC, as in createWalletFromCredentials.
+            resolvedSeedPhrase = mnemonic.joined(separator: " ").precomposedStringWithCanonicalMapping
             resolvedPassphrase = passphrase
 
         case let .polyseed(mnemonic, passphrase):

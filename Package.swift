@@ -46,7 +46,11 @@ let package = Package(
         ),
         .testTarget(
             name: "MoneroKitTests",
-            dependencies: ["MoneroKit", "CMonero"]
+            dependencies: ["MoneroKit", "CMonero"],
+            resources: [
+                // Shared with the Android suite (app/src/test/resources).
+                .copy("Resources/legacy-vectors.json"),
+            ]
         ),
     ],
     cxxLanguageStandard: .cxx11
