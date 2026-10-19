@@ -116,8 +116,33 @@ public class RestoreHeight {
     ]
 
     public static func getHeight(date: Date) -> Int64 {
-        (try? getHeightOrEstimate(date: date)) ?? 0
+        (try? getHeightOrEstimate(date: date)) ?? anchorHeight(atOrBefore: date)
     }
+
+    /// The fallback when the table lookup fails: the height of the newest
+    /// table entry on or before `date`. It is never later than the true
+    /// height, so a restore never skips funds, and it is above 0 for every
+    /// date after the first entry (May 2014), so a new wallet never scans
+    /// from block 0. It reads only timestamps, never the device's calendar,
+    /// locale or digits.
+    static func anchorHeight(atOrBefore date: Date) -> Int64 {
+        anchors.last { $0.date <= date }?.height ?? 0
+    }
+
+    /// The table as (UTC midnight, height), oldest first. Keys are split
+    /// and read with `Int`, which takes ASCII digits only.
+    private static let anchors: [(date: Date, height: Int64)] = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return blockHeights.compactMap { key, height -> (date: Date, height: Int64)? in
+            let parts = key.split(separator: "-").compactMap { Int($0) }
+            guard parts.count == 3,
+                  let date = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+            else { return nil }
+            return (date, height)
+        }
+        .sorted { $0.date < $1.date }
+    }()
 
     public static func maximumEstimatedHeight() -> Int64 {
         // getHeight estimates for now - 2 days, so we assume estimation for now + 2 days is accurate enough
@@ -147,8 +172,14 @@ public class RestoreHeight {
 
         let query = adjustedDate
 
-        // Date formatter for UTC
+        // Table keys are Gregorian UTC dates in ASCII digits. A formatter on
+        // the device locale wrote "2569-03-01" (Buddhist), "۱۴۰۴-۱۲-۱۰"
+        // (Persian) or Arabic-Indic digits, matched no key, and every date
+        // fell through to height 0. Set the calendar after the locale: a new
+        // locale resets the calendar.
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
         formatter.timeZone = utcTimeZone
         formatter.dateFormat = "yyyy-MM-dd"
 
