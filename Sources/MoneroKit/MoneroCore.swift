@@ -904,6 +904,16 @@ class MoneroCore {
         return true
     }
 
+    /// Signs `message` with the spend key of `subaddress` (wallet2 SigV2,
+    /// spend mode). The rules are in `Kit.signMessage(_:subaddress:)`.
+    func signMessage(_ message: String, subaddress: String) throws -> String {
+        try MessageSigner.checkMessage(message)
+        guard let walletPtr = walletPointer else {
+            throw SignMessageError.walletNotOpen
+        }
+        return try MessageSigner.sign(message, subaddress: subaddress, walletPointer: walletPtr)
+    }
+
     /// Signs a transaction and returns it unbroadcast, with its final txids.
     func prepareSend(to address: String, amount: SendAmount, priority: SendPriority = .default, memo: String? = nil) throws -> PreparedTransaction {
         guard let walletPtr = walletPointer else {

@@ -486,6 +486,34 @@ public class Kit {
         return try result.get()
     }
 
+    /// Signs `message` with the spend key of `subaddress` and returns the
+    /// wallet2 "SigV2..." string. This is a SigV2 signature in spend mode:
+    /// its hash binds the subaddress spend and view public keys. Username
+    /// records use it for owner signatures. No network is used.
+    ///
+    /// Throws `SignMessageError` and signs nothing when:
+    /// - the message is not printable ASCII (0x20 to 0x7E), or is longer
+    ///   than 1024 bytes (`invalidMessage`);
+    /// - no wallet is open (`walletNotOpen`);
+    /// - the wallet is a hardware wallet (`hardwareWallet`) or a view-only
+    ///   wallet (`viewOnlyWallet`);
+    /// - `subaddress` is not a subaddress of this wallet. The primary address
+    ///   and integrated addresses are not subaddresses (`notOwnSubaddress`);
+    /// - wallet2 refuses with a status error (`walletError`).
+    ///
+    /// After wallet2 signs, the result must start with "SigV2" (`notSigV2`)
+    /// and pass wallet2 verification for `subaddress` (`selfCheckFailed`).
+    /// There is no public verify call: wallet2 verification also accepts
+    /// view-key signatures, so record checks belong to the record library.
+    public func signMessage(_ message: String, subaddress: String) throws -> String {
+        try MessageSigner.checkMessage(message)
+        do {
+            return try onLifecycleQueue { try moneroCore.signMessage(message, subaddress: subaddress) }
+        } catch MoneroCoreError.walletNotInitialized {
+            throw SignMessageError.walletNotOpen
+        }
+    }
+
     /// Per-transaction secret key for the given txid, usable to prove the
     /// payment to the recipient. Returns nil if wallet doesn't know the
     /// key for this tx.
