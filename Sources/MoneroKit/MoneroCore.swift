@@ -844,37 +844,122 @@ class MoneroCore {
         MONERO_Wallet_pauseRefresh(walletPtr)
         defer { MONERO_Wallet_startRefresh(walletPtr) }
 
-        // Get current count before adding
-        let countBefore = MONERO_Wallet_numSubaddresses(walletPtr, account)
+        return appendSubaddress(walletPtr, label: label)
+    }
 
-        // Add the new subaddress
-        MONERO_Wallet_addSubaddress(walletPtr, account, label)
-
-        // Check if the operation caused an error (e.g. thread contention during sync)
-        let status = MONERO_Wallet_status(walletPtr)
-        if status != 0 {
-            let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
-            NSLog("[MoneroCore] addSubaddress failed with status=\(status): \(errorStr)")
-            return nil
+    /// `addSubaddress`, and the wallet file is stored before it returns.
+    /// wallet2 keeps the subaddress rows in the wallet file, which it
+    /// otherwise writes only at the next sync store or at close: a quit or a
+    /// crash before then forgets the row, and the next new subaddress gets
+    /// the same index and address. Runs on `refreshQueue`, after a
+    /// refresh-and-store in flight there. Call it on the kit's lifecycle
+    /// queue, as `commit`.
+    func addSubaddressAndStore(label: String = "") throws -> (index: Int, address: String) {
+        try refreshQueue.sync {
+            guard let walletPtr = walletPointer else { throw MoneroCoreError.walletNotInitialized }
+            MONERO_Wallet_pauseRefresh(walletPtr)
+            defer { MONERO_Wallet_startRefresh(walletPtr) }
+            guard let created = appendSubaddress(walletPtr, label: label) else {
+                throw MoneroCoreError.walletStatusError("wallet2 added no subaddress")
+            }
+            try storeNow(walletPtr)
+            return created
         }
+    }
 
-        // Get the new count to verify
-        let countAfter = MONERO_Wallet_numSubaddresses(walletPtr, account)
+    /// The index of `address` among this account's subaddresses, from 1 to
+    /// below `limit`, or nil. Each address is derived from the wallet's keys,
+    /// as wallet2 fills its own subaddress table, so it also finds a
+    /// subaddress that the wallet does not list: a wallet restored from its
+    /// seed lists the rows only up to the last one that received funds.
+    func subaddressIndex(of address: String, below limit: Int) -> Int? {
+        guard let walletPtr = walletPointer, limit > 1 else { return nil }
+        for index in 1 ..< limit {
+            if stringFromCString(MONERO_Wallet_address(walletPtr, UInt64(account), UInt64(index))) == address {
+                return index
+            }
+        }
+        return nil
+    }
 
-        // The new index is countBefore (0-indexed)
-        let newIndex = Int(countBefore)
+    /// The number of subaddress rows the wallet lists in this account.
+    func subaddressCount() -> Int {
+        guard let walletPtr = walletPointer else { return 0 }
+        return Int(MONERO_Wallet_numSubaddresses(walletPtr, account))
+    }
 
-        // Get the address for the new subaddress
-        guard let newAddress = stringFromCString(MONERO_Wallet_address(walletPtr, UInt64(account), UInt64(newIndex))) else {
+    /// Lists the subaddress rows up to `index` (the rows added before it get
+    /// no label) and stores the wallet file. False, with no change, when
+    /// `address` is not this wallet's subaddress at `index`.
+    func listSubaddressAndStore(index: Int, address: String) throws -> Bool {
+        try refreshQueue.sync {
+            guard let walletPtr = walletPointer else { throw MoneroCoreError.walletNotInitialized }
+            guard index >= 1, !NullKeyAddress.isNullKey(address),
+                  stringFromCString(MONERO_Wallet_address(walletPtr, UInt64(account), UInt64(index))) == address
+            else { return false }
+            guard Int(MONERO_Wallet_numSubaddresses(walletPtr, account)) <= index else {
+                fetchSubaddresses(walletPointer: walletPtr)
+                return true
+            }
+            MONERO_Wallet_pauseRefresh(walletPtr)
+            defer { MONERO_Wallet_startRefresh(walletPtr) }
+            guard addSubaddressRows(walletPtr, upTo: index + 1, label: "") else {
+                throw MoneroCoreError.walletStatusError("wallet2 added no subaddress")
+            }
+            fetchSubaddresses(walletPointer: walletPtr)
+            NSLog("[MoneroCore] listed subaddress rows through index=\(index)")
+            try storeNow(walletPtr)
+            return true
+        }
+    }
+
+    /// Adds the next subaddress row. Call with refresh paused.
+    private func appendSubaddress(_ walletPtr: UnsafeMutableRawPointer, label: String) -> (index: Int, address: String)? {
+        // The new index is the count before (0-indexed)
+        let newIndex = Int(MONERO_Wallet_numSubaddresses(walletPtr, account))
+        guard addSubaddressRows(walletPtr, upTo: newIndex + 1, label: label),
+              let newAddress = stringFromCString(MONERO_Wallet_address(walletPtr, UInt64(account), UInt64(newIndex)))
+        else {
             return nil
         }
 
         // Refresh subaddresses list
         fetchSubaddresses(walletPointer: walletPtr)
 
-        NSLog("[MoneroCore] addSubaddress: created index=\(newIndex), countBefore=\(countBefore), countAfter=\(countAfter)")
+        NSLog("[MoneroCore] addSubaddress: created index=\(newIndex)")
 
         return (index: newIndex, address: newAddress)
+    }
+
+    /// Adds subaddress rows until the account has `count` of them. Call with
+    /// refresh paused. The row count tells whether wallet2 added a row, not
+    /// its status: the status is one field for the whole wallet, and other
+    /// threads write it. A refresh still in flight and the sync's daemon
+    /// height poll write an error each time the node does not answer. An
+    /// error that lands just after the add made a subaddress that was added
+    /// look failed, and the username flow said "The wallet changed".
+    private func addSubaddressRows(_ walletPtr: UnsafeMutableRawPointer, upTo count: Int, label: String) -> Bool {
+        while true {
+            let before = Int(MONERO_Wallet_numSubaddresses(walletPtr, account))
+            if before >= count { return true }
+            MONERO_Wallet_addSubaddress(walletPtr, account, label)
+            guard Int(MONERO_Wallet_numSubaddresses(walletPtr, account)) == before + 1 else {
+                let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
+                NSLog("[MoneroCore] addSubaddress added no row: \(errorStr)")
+                return false
+            }
+        }
+    }
+
+    /// Writes the wallet file now, as `commit` does. A wallet that did not
+    /// open cleanly is never stored (see `stopCore`).
+    private func storeNow(_ walletPtr: UnsafeMutableRawPointer) throws {
+        guard walletOpenedCleanly else { return }
+        guard MONERO_Wallet_store(walletPtr, cWalletPath) else {
+            let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
+            NSLog("[MoneroCore] store after a new subaddress failed: \(errorStr)")
+            throw MoneroCoreError.walletStatusError(errorStr)
+        }
     }
 
     /// Read the label for a subaddress directly from wallet2's in-memory state

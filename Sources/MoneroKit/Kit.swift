@@ -546,6 +546,67 @@ public class Kit {
         return newSubAddress
     }
 
+    /// Creates the next subaddress and stores the wallet file before it
+    /// returns, so a quit or a crash right after cannot lose it. For an
+    /// address that is given out at once, such as a username's. Runs on the
+    /// lifecycle queue: it waits for an open or a connect in progress, and
+    /// the store waits for a wallet2 refresh in progress.
+    /// - Throws: `MoneroCoreError.walletNotInitialized` when no wallet is
+    ///   open in this kit, and `walletStatusError` when wallet2 added no
+    ///   subaddress or the store failed.
+    public func createSubaddressAndStore(label: String = "") async throws -> SubAddress {
+        try await onLifecycleQueueAsync { [self] in
+            let created = try moneroCore.addSubaddressAndStore(label: label)
+            guard !NullKeyAddress.isNullKey(created.address) else {
+                throw MoneroCoreError.walletStatusError("Wallet keys failed to load")
+            }
+            let newSubAddress = SubAddress(address: created.address, index: created.index, label: label)
+            storage.add(subAddress: newSubAddress)
+            delegate?.subAddressesUpdated(subaddresses: enrichedAddresses())
+            return newSubAddress
+        }
+    }
+
+    /// Up to this many indexes past the listed rows, `listOwnSubaddress`
+    /// looks for a subaddress. wallet2's own table holds 200.
+    public static let subaddressSearchRange = 1000
+
+    /// The subaddress `address` of this wallet, listed: when the wallet does
+    /// not list it yet (a wallet restored from its seed lists the rows only
+    /// up to the last one that received funds), the rows up to it are added
+    /// and the wallet file is stored. Nil, with no change, when `address` is
+    /// not a subaddress of this wallet within `subaddressSearchRange`
+    /// indexes past the listed rows.
+    /// - Throws: `MoneroCoreError.walletNotInitialized` when no wallet is
+    ///   open in this kit, and `walletStatusError` when wallet2 added no row
+    ///   or the store failed.
+    public func listOwnSubaddress(_ address: String) async throws -> SubAddress? {
+        try await onLifecycleQueueAsync { [self] in
+            guard !NullKeyAddress.isNullKey(address),
+                  let index = moneroCore.subaddressIndex(
+                      of: address, below: moneroCore.subaddressCount() + Self.subaddressSearchRange),
+                  try moneroCore.listSubaddressAndStore(index: index, address: address)
+            else { return nil }
+            // The rows reach storage and the delegate through the core's
+            // list update, which keeps each row's transaction counts.
+            return SubAddress(address: address, index: index, label: moneroCore.getSubaddressLabel(index: index))
+        }
+    }
+
+    /// `onLifecycleQueue` for an async caller: the caller's thread does not
+    /// wait for the queue.
+    private func onLifecycleQueueAsync<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            lifecycleQueue.async { [weak self] in
+                guard let self, KitManager.shared.isRunning(kitId: self.kitId) else {
+                    continuation.resume(throwing: MoneroCoreError.walletNotInitialized)
+                    return
+                }
+                continuation.resume(with: Result { try work() })
+            }
+        }
+    }
+
     /// Update the label on an existing subaddress. Persists to the wallet cache.
     /// - Returns: true on success
     @discardableResult
