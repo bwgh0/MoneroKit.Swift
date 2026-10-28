@@ -29,7 +29,26 @@ public class Kit {
 
     public weak var delegate: MoneroKitDelegate?
 
-    public init(wallet: MoneroWallet, account: UInt32, restoreHeight: UInt64 = 0, walletId: String, node: Node, networkType: NetworkType = .mainnet, reachabilityManager: ReachabilityManager, logger: Logger?, moneroCoreLogLevel: Int32? = nil) throws {
+    /// Shortest `walletPassword` the kit accepts: 32 bytes of randomness as
+    /// hex is 64 characters; 32 leaves room for other encodings of at least
+    /// 128 bits.
+    public static let minimumWalletPasswordLength = 32
+
+    /// - Parameters:
+    ///   - walletId: Names the wallet's directory. It is not a secret (it
+    ///     shows in the file path), so it is never the password.
+    ///   - walletPassword: Encrypts the wallet2 `.keys` file, which holds the
+    ///     private spend key. Keep it outside the wallet files, for example
+    ///     as a random per-wallet secret in the Keychain. A file from an older
+    ///     build, encrypted with `walletId`, opens with that and is re-keyed
+    ///     to this password; if that fails, it stays as it was and the next
+    ///     open tries again.
+    public init(wallet: MoneroWallet, account: UInt32, restoreHeight: UInt64 = 0, walletId: String, walletPassword: String, node: Node, networkType: NetworkType = .mainnet, reachabilityManager: ReachabilityManager, logger: Logger?, moneroCoreLogLevel: Int32? = nil) throws {
+        // Fail closed: never encrypt the spend key with a short or derived value.
+        guard walletPassword.utf8.count >= Self.minimumWalletPasswordLength, walletPassword != walletId else {
+            throw MoneroKitError.weakWalletPassword
+        }
+
         let baseDirectoryName = "MoneroKit/\(walletId)/network_\(networkType.rawValue)"
         let baseDirectoryUrl = try FileHandler.directoryURL(for: baseDirectoryName)
 
@@ -57,7 +76,8 @@ public class Kit {
             wallet: wallet,
             account: account,
             walletPath: walletPath,
-            walletPassword: walletId,
+            walletPassword: walletPassword,
+            legacyWalletPassword: walletId,
             node: node,
             restoreHeight: restoreHeight,
             networkType: networkType,
@@ -722,6 +742,9 @@ public extension Kit {
 public enum MoneroKitError: Error {
     case invalidWalletId
     case invalidSeed
+    /// `walletPassword` is shorter than `Kit.minimumWalletPasswordLength`
+    /// or equals the wallet id.
+    case weakWalletPassword
 }
 
 public protocol MoneroKitDelegate: AnyObject {

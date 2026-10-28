@@ -36,7 +36,13 @@ class MoneroCore {
     /// is the only holder of per-transaction keys.
     private var walletOpenedCleanly = false
     private var cWalletPath: UnsafeMutablePointer<CChar>?
+    /// The `.keys` file password: a random per-wallet secret the caller
+    /// keeps outside the wallet files (the app keeps it in the Keychain).
     private var cWalletPassword: UnsafeMutablePointer<CChar>?
+    /// The password that older builds used for this file (the wallet id,
+    /// which is also the directory name). A file that opens only with it is
+    /// re-keyed to `cWalletPassword` once it opens cleanly.
+    private var cLegacyWalletPassword: UnsafeMutablePointer<CChar>?
     private let logger: Logger?
     private let moneroCoreLogLevel: Int32? // 0..4
     private var restoreHeight: UInt64 = 0
@@ -108,11 +114,14 @@ class MoneroCore {
         return walletPointer
     }
 
-    init(wallet: MoneroWallet, account: UInt32, walletPath: String, walletPassword: String, node: Node, restoreHeight: UInt64, networkType: NetworkType, reachabilityManager: ReachabilityManager, logger: Logger?, moneroCoreLogLevel: Int32?) {
+    init(wallet: MoneroWallet, account: UInt32, walletPath: String, walletPassword: String, legacyWalletPassword: String? = nil, node: Node, restoreHeight: UInt64, networkType: NetworkType, reachabilityManager: ReachabilityManager, logger: Logger?, moneroCoreLogLevel: Int32?) {
         self.wallet = wallet
         self.account = account
         cWalletPath = strdup((walletPath as NSString).utf8String)
         cWalletPassword = strdup((walletPassword as NSString).utf8String)
+        if let legacyWalletPassword, legacyWalletPassword != walletPassword {
+            cLegacyWalletPassword = strdup((legacyWalletPassword as NSString).utf8String)
+        }
         self.node = node
         self.restoreHeight = restoreHeight
         self.networkType = networkType
@@ -145,8 +154,11 @@ class MoneroCore {
     deinit {
         wallet.clear()
 
-        // Free non-sensitive data
-        if let ptr = cWalletPassword { free(ptr) }
+        // The passwords are secrets: zero them before the memory goes back.
+        for ptr in [cWalletPassword, cLegacyWalletPassword].compactMap({ $0 }) {
+            memset(ptr, 0, strlen(ptr))
+            free(ptr)
+        }
         if let ptr = cWalletPath { free(ptr) }
     }
 
@@ -165,9 +177,31 @@ class MoneroCore {
 
         let walletExists = MONERO_WalletManager_walletExists(walletManagerPointer, cWalletPath)
         var recoveredWalletPtr: UnsafeMutableRawPointer?
+        /// True when the file opened only with the legacy password.
+        var openedWithLegacyPassword = false
 
         if walletExists {
-            recoveredWalletPtr = MONERO_WalletManager_openWallet(walletManagerPointer, cWalletPath, cWalletPassword, networkType.rawValue)
+            // Each try with the wrong password fails in load_keys, before
+            // the cache loads, and writes nothing: closeWallet(store: false)
+            // and wallet2's own close skip the store of a wallet whose open
+            // failed.
+            var openStatus: Int32 = 1
+            for candidate in passwordCandidates() {
+                if let failedPtr = recoveredWalletPtr {
+                    MONERO_WalletManager_closeWallet(walletManagerPointer, failedPtr, false)
+                    recoveredWalletPtr = nil
+                }
+                recoveredWalletPtr = MONERO_WalletManager_openWallet(walletManagerPointer, cWalletPath, candidate.password, networkType.rawValue)
+                openStatus = recoveredWalletPtr.map { MONERO_Wallet_status($0) } ?? 1
+                openedWithLegacyPassword = candidate.isLegacy
+                // A device wallet can fail after its keys decrypted (the
+                // Trezor bridge is not up yet). Keep that object, as before.
+                if openStatus == 0 { break }
+                if case .trezor = wallet { break }
+            }
+            if openStatus == 0 {
+                NSLog("[MoneroCore] Wallet opened with the \(openedWithLegacyPassword ? "legacy" : "wallet") password")
+            }
 
             // wallet2's openWallet returns a non-null Wallet even when the
             // `.keys` file failed to load or decrypt — the error lives in
@@ -175,10 +209,11 @@ class MoneroCore {
             // zeros). Using that object anyway serves the null-key address
             // to the UI and burns anything sent to it. If we still hold the
             // credentials (every source except a hardware device), discard
-            // the broken object, wipe the unreadable files, and re-derive
-            // the wallet from the credentials — same keys, at worst a
-            // rescan and the loss of stored per-tx keys.
-            let openStatus: Int32 = recoveredWalletPtr.map { MONERO_Wallet_status($0) } ?? 1
+            // the broken object, move the unreadable files aside, and
+            // re-derive the wallet from the credentials — same keys, at
+            // worst a rescan. The old files stay on disk: their cache holds
+            // the per-tx keys, and wallet2 encrypts the cache with a key
+            // from the view key, not with the password.
             var canRecreate: Bool {
                 if case .trezor = wallet { return false }
                 return true
@@ -197,9 +232,10 @@ class MoneroCore {
                 }
 
                 let walletDir = URL(fileURLWithPath: String(cString: cWalletPath)).deletingLastPathComponent()
-                try? FileManager.default.removeItem(at: walletDir)
-                try? FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
+                try Self.moveAside(walletDirectory: walletDir)
+                try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
 
+                openedWithLegacyPassword = false
                 recoveredWalletPtr = try createWalletFromCredentials()
             }
         } else {
@@ -247,6 +283,10 @@ class MoneroCore {
 
         walletOpenedCleanly = walletStatus == 0
 
+        if openedWithLegacyPassword, walletOpenedCleanly {
+            migrateToWalletPassword(walletPtr: walletPtr)
+        }
+
         // Set wallet pointer immediately after recovery — address derivation
         // only needs the wallet2 object, not a daemon connection.
         walletPointer = walletPtr
@@ -258,6 +298,79 @@ class MoneroCore {
         // if log access is ever compromised. Keep address derivation
         // for the sync path that does need it elsewhere.
         _ = stringFromCString(MONERO_Wallet_address(walletPtr, 0, 0))
+    }
+
+    /// The passwords to try on an existing `.keys` file, in order. The one
+    /// that `verifyWalletPassword` accepts comes alone. When none passes the
+    /// check, both come, current first, and the real open decides.
+    private func passwordCandidates() -> [(password: UnsafeMutablePointer<CChar>, isLegacy: Bool)] {
+        guard let cWalletPassword else { return [] }
+        var candidates = [(password: cWalletPassword, isLegacy: false)]
+        if let cLegacyWalletPassword {
+            candidates.append((password: cLegacyWalletPassword, isLegacy: true))
+        }
+        guard candidates.count > 1, let walletManagerPointer, let keysPath = keysFilePath else { return candidates }
+        // no_spend_key: a view-only or device wallet stores no spend key, and
+        // the view key alone proves the password decrypted the file.
+        if let verified = candidates.first(where: {
+            MONERO_WalletManager_verifyWalletPassword(walletManagerPointer, keysPath, $0.password, true, 1)
+        }) {
+            return [verified]
+        }
+        return candidates
+    }
+
+    private var keysFilePath: String? {
+        cWalletPath.map { String(cString: $0) + ".keys" }
+    }
+
+    /// Re-encrypt the `.keys` file of a wallet that opened with the legacy
+    /// password under `cWalletPassword`. wallet2's change_password writes
+    /// the new `.keys` file to `wallet.keys.new` and renames it over the old
+    /// one, so the file on disk is always the old one or the new one. The
+    /// cache file keeps its own key (from the view key), so the per-tx keys
+    /// in it are untouched. The caller must hold the new password somewhere
+    /// safe before this runs. On any failure the wallet stays open with the
+    /// legacy password, nothing is deleted, and the next open tries again.
+    private func migrateToWalletPassword(walletPtr: UnsafeMutableRawPointer) {
+        guard let cWalletPassword, let walletManagerPointer, let keysPath = keysFilePath else { return }
+
+        let changed = MONERO_Wallet_setPassword(walletPtr, cWalletPassword)
+        let status = MONERO_Wallet_status(walletPtr)
+        if !changed || status != 0 {
+            let msg = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
+            NSLog("[MoneroCore] Wallet password migration failed (status=\(status)): \(msg); the legacy password still opens it, next open tries again")
+            logger?.error("Wallet password migration failed (status=\(status)): \(msg)")
+            // The error status the failed change left is cleared by
+            // MONERO_Wallet_init in connectDaemon(), before the status poll
+            // starts. Nothing else is written here.
+            return
+        }
+
+        let newOpens = MONERO_WalletManager_verifyWalletPassword(walletManagerPointer, keysPath, cWalletPassword, true, 1)
+        let legacyOpens = cLegacyWalletPassword.map {
+            MONERO_WalletManager_verifyWalletPassword(walletManagerPointer, keysPath, $0, true, 1)
+        } ?? false
+        NSLog("[MoneroCore] Wallet password migration done (new password opens: \(newOpens), legacy opens: \(legacyOpens))")
+        logger?.info("Wallet password migration done (new password opens: \(newOpens), legacy opens: \(legacyOpens))")
+    }
+
+    /// Rename an unreadable wallet directory to `<name>.unreadable-<time>`
+    /// next to it. Nothing is deleted: the directory goes with its wallet
+    /// when the wallet's cache is removed.
+    static func moveAside(walletDirectory: URL) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: walletDirectory.path) else { return }
+        let stamp = Int(Date().timeIntervalSince1970 * 1000)
+        var target = walletDirectory.deletingLastPathComponent()
+            .appendingPathComponent("\(walletDirectory.lastPathComponent).unreadable-\(stamp)")
+        var suffix = 1
+        while fm.fileExists(atPath: target.path) {
+            target = walletDirectory.deletingLastPathComponent()
+                .appendingPathComponent("\(walletDirectory.lastPathComponent).unreadable-\(stamp)-\(suffix)")
+            suffix += 1
+        }
+        try fm.moveItem(at: walletDirectory, to: target)
     }
 
     /// Create the wallet2 files at `cWalletPath` from the in-memory

@@ -18,6 +18,7 @@ final class QueueQoSTests: XCTestCase {
             wallet: .watch(address: "", viewKey: ""),
             account: 0,
             walletId: walletId,
+            walletPassword: String(repeating: "0", count: Kit.minimumWalletPasswordLength),
             node: Node(url: URL(string: "https://node.monero.one:443")!, isTrusted: false),
             reachabilityManager: ReachabilityManager(),
             logger: nil
