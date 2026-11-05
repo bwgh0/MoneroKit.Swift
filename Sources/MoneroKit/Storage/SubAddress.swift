@@ -9,7 +9,8 @@ public class SubAddress: Record {
     /// Not persisted in GRDB — wallet2 is the source of truth.
     public var label: String
 
-    init(address: String, index: Int, transactionsCount: Int = 0, label: String = "") {
+    /// Public for the app's tests, which stand in for a kit.
+    public init(address: String, index: Int, transactionsCount: Int = 0, label: String = "") {
         self.address = address
         self.index = index
         self.transactionsCount = transactionsCount

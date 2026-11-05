@@ -248,8 +248,13 @@ public class Kit {
         if kitState == .running {
             moneroCore.setConnectingState(waiting: false)
 
+            // Read before the open: the open's subaddress list replaces the
+            // database's rows with the wallet file's.
+            let storedBeforeOpen = storage.getAllAddresses()
+
             // Phase 1: Create/recover wallet object (fast, no network)
             moneroCore.prepare()
+            Self.relistStoredSubaddresses(storedBeforeOpen, in: moneroCore)
 
             // Derive address immediately — wallet pointer is set, no daemon needed
             let currentAddresses = storage.getAllAddresses()
@@ -514,6 +519,20 @@ public class Kit {
         }
     }
 
+    /// `signMessage(_:subaddress:)` for an async caller: the caller's
+    /// thread does not wait while the lifecycle queue finishes an open, a
+    /// connect or a send ahead of the sign. Same rules and errors.
+    public func signMessage(_ message: String, subaddress: String) async throws -> String {
+        try MessageSigner.checkMessage(message)
+        do {
+            return try await onLifecycleQueueAsync { [self] in
+                try moneroCore.signMessage(message, subaddress: subaddress)
+            }
+        } catch MoneroCoreError.walletNotInitialized {
+            throw SignMessageError.walletNotOpen
+        }
+    }
+
     /// Per-transaction secret key for the given txid, usable to prove the
     /// payment to the recipient. Returns nil if wallet doesn't know the
     /// key for this tx.
@@ -546,14 +565,20 @@ public class Kit {
         return newSubAddress
     }
 
-    /// Creates the next subaddress and stores the wallet file before it
-    /// returns, so a quit or a crash right after cannot lose it. For an
-    /// address that is given out at once, such as a username's. Runs on the
-    /// lifecycle queue: it waits for an open or a connect in progress, and
-    /// the store waits for a wallet2 refresh in progress.
+    /// Creates the next subaddress and stores the wallet file, so a quit or
+    /// a crash right after cannot lose it and the next new subaddress never
+    /// gets the same address. For an address that is given out at once: a
+    /// username's, New Address and receive-address rotation. Runs on the
+    /// lifecycle queue: it waits for an open or a connect in progress.
+    ///
+    /// The wallet-file store waits for a wallet2 refresh in progress, up to
+    /// about 20 s when the node does not answer. This call waits for it only
+    /// a moment (`MoneroCore.subaddressStoreWait`); the store lands when the
+    /// refresh ends. Until then this kit's database holds the new row, and
+    /// the next open lists it in wallet2 again.
     /// - Throws: `MoneroCoreError.walletNotInitialized` when no wallet is
     ///   open in this kit, and `walletStatusError` when wallet2 added no
-    ///   subaddress or the store failed.
+    ///   subaddress, the store failed, or the wallet stayed busy.
     public func createSubaddressAndStore(label: String = "") async throws -> SubAddress {
         try await onLifecycleQueueAsync { [self] in
             let created = try moneroCore.addSubaddressAndStore(label: label)
@@ -561,9 +586,34 @@ public class Kit {
                 throw MoneroCoreError.walletStatusError("Wallet keys failed to load")
             }
             let newSubAddress = SubAddress(address: created.address, index: created.index, label: label)
-            storage.add(subAddress: newSubAddress)
+            if !storage.add(subAddress: newSubAddress), moneroCore.subaddressStorePending {
+                NSLog("[Kit] the database did not save subaddress index=\(created.index); only the pending wallet-file store keeps it")
+            }
             delegate?.subAddressesUpdated(subaddresses: enrichedAddresses())
             return newSubAddress
+        }
+    }
+
+    /// Lists in wallet2 the rows that this kit's database has past the
+    /// wallet file's rows: a new subaddress whose wallet-file store had not
+    /// landed when the app stopped (`createSubaddressAndStore` returns before
+    /// a store that waits for a refresh). Without it, the next new subaddress
+    /// would get that row's index and address again. Call it right after the
+    /// open, before the daemon connect, with the rows read before the open:
+    /// it does not start wallet2's refresh. A row whose address wallet2 does
+    /// not derive at its index changes nothing.
+    static func relistStoredSubaddresses(_ stored: [SubAddress], in moneroCore: MoneroCore) {
+        guard let top = stored.filter({ !NullKeyAddress.isNullKey($0.address) }).max(by: { $0.index < $1.index }),
+              top.index >= moneroCore.subaddressCount()
+        else { return }
+        do {
+            if try moneroCore.listSubaddressAndStore(index: top.index, address: top.address, restartRefresh: false) {
+                NSLog("[Kit] listed the database's subaddress rows again through index=\(top.index)")
+            } else {
+                NSLog("[Kit] database subaddress row index=\(top.index) is not this wallet's; nothing listed")
+            }
+        } catch {
+            NSLog("[Kit] listing the database's subaddress rows failed: \(error)")
         }
     }
 

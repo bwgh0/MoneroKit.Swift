@@ -216,4 +216,27 @@ final class SignMessageTests: XCTestCase {
         assertRefused(.walletNotOpen) { try kit.signMessage(Self.message, subaddress: Self.ownerSubaddress) }
         assertRefused(.invalidMessage) { try kit.signMessage("héllo", subaddress: Self.ownerSubaddress) }
     }
+
+    /// The async call that the app's username flow uses: the same refusals.
+    func testAsyncSignOnAKitThatIsNotRunningRefuses() async throws {
+        let walletId = "sign-message-test-\(UUID().uuidString)"
+        defer { try? FileHandler.remove(for: "MoneroKit/\(walletId)") }
+        let kit = try Kit(
+            wallet: .watch(address: "", viewKey: ""),
+            account: 0,
+            walletId: walletId,
+            node: Node(url: URL(string: "http://localhost:1")!, isTrusted: false),
+            reachabilityManager: ReachabilityManager(),
+            logger: nil
+        )
+
+        for (message, expected) in [(Self.message, SignMessageError.walletNotOpen), ("héllo", .invalidMessage)] {
+            do {
+                _ = try await kit.signMessage(message, subaddress: Self.ownerSubaddress)
+                XCTFail("signed on a kit that is not running")
+            } catch {
+                XCTAssertEqual(error as? SignMessageError, expected)
+            }
+        }
+    }
 }
