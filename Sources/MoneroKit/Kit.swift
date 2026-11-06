@@ -571,11 +571,15 @@ public class Kit {
     /// username's, New Address and receive-address rotation. Runs on the
     /// lifecycle queue: it waits for an open or a connect in progress.
     ///
-    /// The wallet-file store waits for a wallet2 refresh in progress, up to
-    /// about 20 s when the node does not answer. This call waits for it only
-    /// a moment (`MoneroCore.subaddressStoreWait`); the store lands when the
-    /// refresh ends. Until then this kit's database holds the new row, and
-    /// the next open lists it in wallet2 again.
+    /// The add waits for a wallet2 refresh pass in flight, so it never
+    /// changes the subaddress table during a scan. With a node that does not
+    /// answer, a pass can wait up to about 20 s; this call waits at most
+    /// `MoneroCore.subaddressChangeWait`, and then fails with nothing added.
+    /// The store after the add finds the refresh at rest. A store that takes
+    /// longer than `MoneroCore.subaddressStoreWait` lands after this
+    /// returns; until then this kit's database holds the new row, and the
+    /// next open lists it in wallet2 again. The add never starts the refresh
+    /// while sync is paused.
     /// - Throws: `MoneroCoreError.walletNotInitialized` when no wallet is
     ///   open in this kit, and `walletStatusError` when wallet2 added no
     ///   subaddress, the store failed, or the wallet stayed busy.
@@ -596,8 +600,8 @@ public class Kit {
 
     /// Lists in wallet2 the rows that this kit's database has past the
     /// wallet file's rows: a new subaddress whose wallet-file store had not
-    /// landed when the app stopped (`createSubaddressAndStore` returns before
-    /// a store that waits for a refresh). Without it, the next new subaddress
+    /// landed when the app stopped (`createSubaddressAndStore` can return
+    /// before a slow store). Without it, the next new subaddress
     /// would get that row's index and address again. Call it right after the
     /// open, before the daemon connect, with the rows read before the open:
     /// it does not start wallet2's refresh. A row whose address wallet2 does
@@ -607,7 +611,7 @@ public class Kit {
               top.index >= moneroCore.subaddressCount()
         else { return }
         do {
-            if try moneroCore.listSubaddressAndStore(index: top.index, address: top.address, restartRefresh: false) {
+            if try moneroCore.listSubaddressAndStore(index: top.index, address: top.address) {
                 NSLog("[Kit] listed the database's subaddress rows again through index=\(top.index)")
             } else {
                 NSLog("[Kit] database subaddress row index=\(top.index) is not this wallet's; nothing listed")
@@ -657,11 +661,25 @@ public class Kit {
         }
     }
 
-    /// Update the label on an existing subaddress. Persists to the wallet cache.
-    /// - Returns: true on success
+    /// Sets the label of an existing subaddress and stores the wallet file,
+    /// the way `createSubaddressAndStore` stores a new one: on the lifecycle
+    /// queue, never on the caller's thread, with wallet2's refresh at rest.
+    /// The call waits for a refresh pass in flight only a few seconds
+    /// (`MoneroCore.subaddressChangeWait`).
+    /// - Returns: false when no wallet is open in this kit, the wallet lists
+    ///   no subaddress at `index`, wallet2 did not take the label, the store
+    ///   failed, or the wallet stayed busy (the label is then unchanged).
     @discardableResult
-    public func setSubaddressLabel(index: Int, label: String) -> Bool {
-        moneroCore.setSubaddressLabel(index: index, label: label)
+    public func setSubaddressLabel(index: Int, label: String) async -> Bool {
+        do {
+            try await onLifecycleQueueAsync { [self] in
+                try moneroCore.setSubaddressLabelAndStore(index: index, label: label)
+            }
+            return true
+        } catch {
+            NSLog("[Kit] label for subaddress index=\(index) not set: \(error)")
+            return false
+        }
     }
 
     // MARK: - Hardware-wallet sync (TREZOR-bound wallet only)

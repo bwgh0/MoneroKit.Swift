@@ -8,9 +8,13 @@ class MoneroCore {
 
     private let globalEventQueue = DispatchQueue.global(qos: .userInteractive)
     private let refreshQueue = DispatchQueue(label: "io.horizontalsystems.monero_kit.core_refresh_queue", qos: .utility)
+    /// Every start and pause of wallet2's refresh thread goes through it.
+    let refreshGate = RefreshGate()
+    /// Set from `pauseSync` until `startSync`.
+    private let callerPause = CallerPause()
 
     private var wallet: MoneroWallet
-    private var stateManager: SyncStateManager
+    private(set) var stateManager: SyncStateManager
     private var walletListener: WalletListener
     private var networkType: NetworkType = .mainnet
     private var walletManagerPointer: UnsafeMutableRawPointer?
@@ -438,8 +442,16 @@ class MoneroCore {
 
         case let .idle(daemonReachable):
             if daemonReachable {
+                // Paused by the caller (Trusted Locations, background): the
+                // network's return must not start sync. `startSync` does.
+                guard !callerPause.deferServices() else {
+                    NSLog("[MoneroCore] network back while sync is paused: services start at the next startSync")
+                    return
+                }
                 startWalletServices()
             } else {
+                // The network went down again: `startSync` takes its usual path.
+                callerPause.servicesStopped()
                 stopWalletServices()
                 // The wallet stays open while the network is down. Bind the
                 // callbacks again, or the .idle(daemonReachable: true) of the
@@ -450,7 +462,13 @@ class MoneroCore {
         }
     }
 
+    /// Held, the store's LOCK_REFRESH reads the refresh as off and never
+    /// starts it again itself: the gate does, and only while sync is on.
+    /// Without the hold, a store that waited for the refresh across a
+    /// `pauseSync` started the refresh again when it ended.
     private func storeWallet(walletPointer: UnsafeMutableRawPointer) {
+        refreshGate.hold(walletPointer)
+        defer { refreshGate.release(walletPointer) }
         _ = MONERO_Wallet_store(walletPointer, cWalletPath)
     }
 
@@ -628,10 +646,17 @@ class MoneroCore {
 
         startStateManager()
         walletListener.start(walletPointer: walletPointer)
+        refreshGate.syncStarted(walletPointer)
     }
 
     private func stopWalletServices() {
         NSLog("[MoneroCore] stopWalletServices() called, self=\(Unmanaged.passUnretained(self).toOpaque())")
+
+        // Sync off first: a wallet change or a store that ends meanwhile
+        // must not start the refresh again.
+        if let walletPointer {
+            refreshGate.syncPaused(walletPointer)
+        }
 
         // Stop wallet listener first
         let t1 = Date()
@@ -677,6 +702,8 @@ class MoneroCore {
 
     /// Start the refresh thread and state polling. Must call connectToDaemon() first.
     func startServices() {
+        // A new start turns sync on: an old pause no longer holds the services.
+        _ = callerPause.end()
         startWalletServices()
     }
 
@@ -706,8 +733,16 @@ class MoneroCore {
         // Only restart if wallet is open
         guard let walletPtr = walletPointer else { return }
 
-        // Kick off wallet2's background refresh to actually download new blocks
-        MONERO_Wallet_startRefresh(walletPtr)
+        // The network went down and came back while sync was paused: the
+        // services stopped then, and start now.
+        if callerPause.end() {
+            startWalletServices()
+            return
+        }
+
+        // Kick off wallet2's background refresh to actually download new
+        // blocks (at once, or when a wallet change in progress ends).
+        refreshGate.syncStarted(walletPtr)
 
         // Restart the state manager to poll sync progress
         startStateManager()
@@ -715,13 +750,14 @@ class MoneroCore {
 
     /// Pause sync — stops refresh thread and state manager polling
     /// Unlike stop(), this preserves pointers and callbacks so sync can resume
+    ///
+    /// A wallet change or a store in progress does not undo it: it lets the
+    /// refresh run again only while sync is on (`RefreshGate`). A refresh
+    /// pass already running ends at its next block batch.
     func pauseSync() {
         guard let walletPtr = walletPointer else { return }
-        // A subaddress store that still waits for the refresh starts the
-        // refresh again when it ends; let it end first so it cannot undo
-        // this pause.
-        waitForSubaddressStores()
-        MONERO_Wallet_pauseRefresh(walletPtr)
+        callerPause.begin()
+        refreshGate.syncPaused(walletPtr)
         stateManager.pause()
     }
 
@@ -840,23 +876,29 @@ class MoneroCore {
     /// Add a new subaddress to the wallet
     /// - Parameter label: Optional label for the subaddress
     /// - Returns: The index and address of the newly created subaddress
+    ///
+    /// It does not wait for a refresh pass in flight, and a quit loses the
+    /// row: use `addSubaddressAndStore`.
     func addSubaddress(label: String = "") -> (index: Int, address: String)? {
         guard let walletPtr = walletPointer else { return nil }
 
         // Pause refresh thread — wallet2 isn't thread-safe for addSubaddress
-        // while refresh is running, causing an abort in the C++ layer
-        MONERO_Wallet_pauseRefresh(walletPtr)
-        defer { MONERO_Wallet_startRefresh(walletPtr) }
+        // while refresh is running, causing an abort in the C++ layer. The
+        // gate starts it again only while sync is on.
+        refreshGate.hold(walletPtr)
+        defer { refreshGate.release(walletPtr) }
 
         return appendSubaddress(walletPtr, label: label)
     }
 
-    /// How long `addSubaddressAndStore` waits for its block to start on
-    /// `refreshQueue`, where a refresh-and-store or an earlier subaddress
-    /// store can run.
-    static let subaddressAddWait: TimeInterval = 3
-    /// How long `addSubaddressAndStore` waits for the wallet-file store
-    /// after the add. A store waits for wallet2's refresh (see below).
+    /// How long a subaddress change (`addSubaddressAndStore`,
+    /// `setSubaddressLabelAndStore`) waits to start: for its turn on
+    /// `refreshQueue`, then for a wallet2 refresh pass in flight to end
+    /// (`settleRefresh`). With a node that answers, a pass ends at its next
+    /// block batch.
+    static let subaddressChangeWait: TimeInterval = 5
+    /// How long a subaddress change waits for the wallet-file store after
+    /// the change. The refresh is at rest then, so the store only writes.
     static let subaddressStoreWait: TimeInterval = 1.5
 
     /// `addSubaddress`, and the wallet file is stored. wallet2 keeps the
@@ -864,49 +906,102 @@ class MoneroCore {
     /// the next sync store or at close: a quit or a crash before then forgets
     /// the row, and the next new subaddress gets the same index and address.
     ///
-    /// The store goes through `WalletImpl::store`, whose LOCK_REFRESH takes
-    /// both refresh mutexes (monero_c patch 0002). wallet2's refresh thread
-    /// holds them for a whole `doRefresh`, and with a node that does not
-    /// answer, `doRefresh` sits in `check_connection` for up to 20 s
-    /// (DEFAULT_CONNECTION_TIMEOUT_MILLIS). Nothing cuts that connect short,
-    /// and a store without the lock races the refresh. So the store waits,
-    /// but the caller does not: it gets the new row after the add and at
-    /// most `storeWait` of the store. The store lands when the refresh ends.
-    /// Until then the kit's database lists the row, and `Kit` lists it in
-    /// wallet2 again at the next open (`Kit.relistStoredSubaddresses`).
-    ///
-    /// The add and the store run in one block on `refreshQueue`, after a
-    /// refresh-and-store queued there, so nothing on that queue reads the
-    /// rows while they change. Call it on the kit's lifecycle queue.
+    /// The add waits for a refresh pass in flight (`changeAndStore`), so it
+    /// never changes wallet2's subaddress table while a scan reads it. If
+    /// the store takes longer than `storeWait`, this returns first and the
+    /// store lands later. Until then the kit's database lists the row, and
+    /// `Kit` lists it in wallet2 again at the next open
+    /// (`Kit.relistStoredSubaddresses`). Call it on the kit's lifecycle
+    /// queue.
     /// - Throws: `walletNotInitialized` with no wallet open;
     ///   `walletStatusError` when wallet2 added no row, when the store failed
-    ///   within `storeWait`, or when the block did not start within
-    ///   `addWait` (it then never adds a row).
+    ///   within `storeWait`, or ("The wallet is busy") when the add did not
+    ///   start within `addWait` (it then never adds a row).
     func addSubaddressAndStore(
         label: String = "",
-        addWait: TimeInterval = MoneroCore.subaddressAddWait,
+        addWait: TimeInterval = MoneroCore.subaddressChangeWait,
         storeWait: TimeInterval = MoneroCore.subaddressStoreWait
     ) throws -> (index: Int, address: String) {
-        let job = SubaddressStoreJob()
+        try changeAndStore(changeWait: addWait, storeWait: storeWait) { core, walletPtr -> Result<(index: Int, address: String), Error> in
+            guard let created = core.appendSubaddress(walletPtr, label: label) else {
+                return .failure(MoneroCoreError.walletStatusError("wallet2 added no subaddress"))
+            }
+            return .success(created)
+        }
+    }
+
+    /// Sets the label of the subaddress at `index` and stores the wallet
+    /// file, the same way as `addSubaddressAndStore`: the caller waits at
+    /// most `labelWait` and `storeWait`, never for a whole refresh. Call it
+    /// on the kit's lifecycle queue.
+    /// - Throws: `walletNotInitialized` with no wallet open;
+    ///   `walletStatusError` when the wallet lists no row at `index`, when
+    ///   wallet2 did not take the label, when the store failed within
+    ///   `storeWait`, or ("The wallet is busy") when the change did not start
+    ///   within `labelWait` (it then never changes the label).
+    func setSubaddressLabelAndStore(
+        index: Int,
+        label: String,
+        labelWait: TimeInterval = MoneroCore.subaddressChangeWait,
+        storeWait: TimeInterval = MoneroCore.subaddressStoreWait
+    ) throws {
+        try changeAndStore(changeWait: labelWait, storeWait: storeWait) { core, walletPtr -> Result<Void, Error> in
+            guard index >= 0, index < Int(MONERO_Wallet_numSubaddresses(walletPtr, core.account)) else {
+                return .failure(MoneroCoreError.walletStatusError("No subaddress at this index"))
+            }
+            MONERO_Wallet_setSubaddressLabel(walletPtr, core.account, UInt32(index), label)
+            // The label read back, not the wallet status: other threads
+            // write the status (see `addSubaddressRows`).
+            guard stringFromCString(MONERO_Wallet_getSubaddressLabel(walletPtr, core.account, UInt32(index))) == label else {
+                let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
+                NSLog("[MoneroCore] setSubaddressLabel index=\(index) failed: \(errorStr)")
+                return .failure(MoneroCoreError.walletStatusError(errorStr))
+            }
+            core.fetchSubaddresses(walletPointer: walletPtr)
+            return .success(())
+        }
+    }
+
+    /// Runs `change` on `refreshQueue` with wallet2's refresh at rest, then
+    /// stores the wallet file.
+    ///
+    /// The block holds the refresh (`refreshGate`), so no new pass starts,
+    /// and waits for a pass in flight to end (`settleRefresh`) before the
+    /// change. A pass reads and grows wallet2's subaddress table from its
+    /// threads with no lock, and `pauseRefresh` alone does not wait for it.
+    /// The store after the change then finds the refresh at rest. When the
+    /// block ends, the refresh runs again only while sync is on: a change
+    /// while sync is paused (Trusted Locations, background) never starts it,
+    /// and so never calls the node. The next `startSync` does.
+    ///
+    /// The caller waits up to `changeWait` for the change, and the block
+    /// then never runs a change it did not start by that time. After the
+    /// change, the caller waits up to `storeWait` for the store; a store
+    /// that takes longer lands later.
+    private func changeAndStore<Value>(
+        changeWait: TimeInterval,
+        storeWait: TimeInterval,
+        _ change: @escaping (MoneroCore, UnsafeMutableRawPointer) -> Result<Value, Error>
+    ) throws -> Value {
+        let job = SubaddressStoreJob<Value>()
         subaddressStores.begin()
         let work = DispatchWorkItem(qos: .userInitiated, flags: .enforceQoS) { [weak self] in
             guard let self else {
-                job.finishAdd(.failure(MoneroCoreError.walletNotInitialized))
+                job.finishChange(.failure(MoneroCoreError.walletNotInitialized))
                 return
             }
             defer { subaddressStores.end() }
-            guard job.start() else { return }
             guard let walletPtr = walletPointer else {
-                job.finishAdd(.failure(MoneroCoreError.walletNotInitialized))
+                job.finishChange(.failure(MoneroCoreError.walletNotInitialized))
                 return
             }
-            MONERO_Wallet_pauseRefresh(walletPtr)
-            defer { MONERO_Wallet_startRefresh(walletPtr) }
-            guard let created = appendSubaddress(walletPtr, label: label) else {
-                job.finishAdd(.failure(MoneroCoreError.walletStatusError("wallet2 added no subaddress")))
-                return
-            }
-            job.finishAdd(.success(created))
+            refreshGate.hold(walletPtr)
+            defer { refreshGate.release(walletPtr) }
+            settleRefresh(walletPtr)
+            guard job.start() else { return }
+            let result = change(self, walletPtr)
+            job.finishChange(result)
+            guard case .success = result else { return }
             let started = Date()
             do {
                 try storeNow(walletPtr)
@@ -916,35 +1011,66 @@ class MoneroCore {
             }
             let waited = Date().timeIntervalSince(started)
             if waited > storeWait {
-                NSLog("[MoneroCore] store after new subaddress index=\(created.index) landed after %.1f s", waited)
+                NSLog("[MoneroCore] store after a subaddress change landed after %.1f s", waited)
             }
         }
         refreshQueue.async(execute: work)
 
-        guard let added = job.waitForAdd(timeout: addWait) else {
-            NSLog("[MoneroCore] addSubaddress: the refresh queue stayed busy for %.1f s, added nothing", addWait)
+        guard let changed = job.waitForChange(timeout: changeWait) else {
+            NSLog("[MoneroCore] subaddress change: the wallet stayed busy for %.1f s, changed nothing", changeWait)
             throw MoneroCoreError.walletStatusError("The wallet is busy")
         }
-        let created = try added.get()
+        let value = try changed.get()
         switch job.waitForStore(timeout: storeWait) {
         case .none:
-            NSLog("[MoneroCore] addSubaddress: index=\(created.index) returned before its store, which waits for wallet2's refresh")
+            NSLog("[MoneroCore] subaddress change returned before its store")
         case let .some(error?):
             throw error
         case .some(.none):
             break
         }
-        return created
+        return value
     }
 
-    /// Subaddress stores that are queued or running on `refreshQueue`.
+    /// Waits until a wallet2 refresh pass in flight has ended. Call it on
+    /// `refreshQueue` with the refresh held (`refreshGate.hold`): then no
+    /// new pass starts until the release.
+    ///
+    /// `pauseRefresh` keeps new passes from starting and ends a running one
+    /// at its next block batch, but does not wait for it. The pass's threads
+    /// read wallet2's subaddress table (`m_subaddresses`) and grow it and
+    /// `m_subaddress_labels` (`expand_subaddresses`) with no lock, and
+    /// `add_subaddress` changes the same containers: a change during a scan
+    /// is a data race, a crash or a missed output. A TestFlight build
+    /// crashed on a new subaddress during sync (app 24ecdfc).
+    ///
+    /// The C API's only wait for a pass is the LOCK_REFRESH in
+    /// `WalletImpl::store`, which takes both refresh mutexes, so this stores
+    /// the wallet file. With a node that does not answer, the pass ends only
+    /// when its daemon call does: up to 20 s for a connect, longer for a
+    /// reply that stops midway. A wallet that did not open cleanly is never
+    /// stored (see `stopCore`); for it this does not wait.
+    private func settleRefresh(_ walletPtr: UnsafeMutableRawPointer) {
+        guard walletOpenedCleanly else { return }
+        let started = Date()
+        if !MONERO_Wallet_store(walletPtr, cWalletPath) {
+            let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
+            NSLog("[MoneroCore] store before a subaddress change failed: \(errorStr)")
+        }
+        let waited = Date().timeIntervalSince(started)
+        if waited > 1 {
+            NSLog("[MoneroCore] a refresh pass in flight ended after %.1f s", waited)
+        }
+    }
+
+    /// Subaddress changes that are queued or running on `refreshQueue`.
     private let subaddressStores = PendingCount()
 
-    /// True while a store from `addSubaddressAndStore` is queued or waits
-    /// for wallet2's refresh.
+    /// True while a subaddress change (`changeAndStore`) is queued, waits
+    /// for a refresh pass, or stores.
     var subaddressStorePending: Bool { subaddressStores.value > 0 }
 
-    /// Waits until each subaddress store queued so far has ended. Not on
+    /// Waits until each subaddress change queued so far has ended. Not on
     /// `refreshQueue`.
     func waitForSubaddressStores() {
         guard subaddressStorePending else { return }
@@ -974,10 +1100,11 @@ class MoneroCore {
 
     /// Lists the subaddress rows up to `index` (the rows added before it get
     /// no label) and stores the wallet file. False, with no change, when
-    /// `address` is not this wallet's subaddress at `index`.
-    /// - Parameter restartRefresh: false before the daemon connect, when
-    ///   wallet2's refresh has not started and must not start yet.
-    func listSubaddressAndStore(index: Int, address: String, restartRefresh: Bool = true) throws -> Bool {
+    /// `address` is not this wallet's subaddress at `index`. The rows are
+    /// added with the refresh at rest (`settleRefresh`), and the refresh
+    /// runs again after it only while sync is on: never before the daemon
+    /// connect or while sync is paused.
+    func listSubaddressAndStore(index: Int, address: String) throws -> Bool {
         try refreshQueue.sync {
             guard let walletPtr = walletPointer else { throw MoneroCoreError.walletNotInitialized }
             guard index >= 1, !NullKeyAddress.isNullKey(address),
@@ -987,8 +1114,9 @@ class MoneroCore {
                 fetchSubaddresses(walletPointer: walletPtr)
                 return true
             }
-            MONERO_Wallet_pauseRefresh(walletPtr)
-            defer { if restartRefresh { MONERO_Wallet_startRefresh(walletPtr) } }
+            refreshGate.hold(walletPtr)
+            defer { refreshGate.release(walletPtr) }
+            settleRefresh(walletPtr)
             guard addSubaddressRows(walletPtr, upTo: index + 1, label: "") else {
                 throw MoneroCoreError.walletStatusError("wallet2 added no subaddress")
             }
@@ -1053,26 +1181,6 @@ class MoneroCore {
     func getSubaddressLabel(index: Int) -> String {
         guard let walletPtr = walletPointer else { return "" }
         return stringFromCString(MONERO_Wallet_getSubaddressLabel(walletPtr, account, UInt32(index))) ?? ""
-    }
-
-    /// Set a label on an existing subaddress and persist to the wallet cache.
-    /// - Returns: true on success
-    @discardableResult
-    func setSubaddressLabel(index: Int, label: String) -> Bool {
-        guard let walletPtr = walletPointer else { return false }
-
-        MONERO_Wallet_setSubaddressLabel(walletPtr, account, UInt32(index), label)
-
-        let status = MONERO_Wallet_status(walletPtr)
-        if status != 0 {
-            let errorStr = stringFromCString(MONERO_Wallet_errorString(walletPtr)) ?? "unknown"
-            NSLog("[MoneroCore] setSubaddressLabel failed status=\(status): \(errorStr)")
-            return false
-        }
-
-        _ = MONERO_Wallet_store(walletPtr, cWalletPath)
-        fetchSubaddresses(walletPointer: walletPtr)
-        return true
     }
 
     /// Signs `message` with the spend key of `subaddress` (wallet2 SigV2,
@@ -1358,20 +1466,21 @@ protocol MoneroCoreDelegate: AnyObject {
     func restoreHeightUpdated(height: UInt64)
 }
 
-/// The hand-off between `MoneroCore.addSubaddressAndStore` and its block on
-/// the refresh queue. The caller can stop waiting for a block that has not
-/// started: that block then adds nothing.
-final class SubaddressStoreJob {
+/// The hand-off between a subaddress change (`MoneroCore.changeAndStore`)
+/// and its block on the refresh queue. The caller can stop waiting for a
+/// change that has not started: that block then changes nothing.
+final class SubaddressStoreJob<Value> {
     private enum Phase { case queued, running, abandoned }
 
     private let lock = NSLock()
-    private let added = DispatchSemaphore(value: 0)
+    private let changed = DispatchSemaphore(value: 0)
     private let stored = DispatchSemaphore(value: 0)
     private var phase = Phase.queued
-    private var addResult: Result<(index: Int, address: String), Error>?
+    private var changeResult: Result<Value, Error>?
     private var storeError: Error?
 
-    /// The block calls it first. False when the caller stopped waiting.
+    /// The block calls it right before the change. False when the caller
+    /// stopped waiting.
     func start() -> Bool {
         lock.withLock {
             guard phase == .queued else { return false }
@@ -1380,9 +1489,9 @@ final class SubaddressStoreJob {
         }
     }
 
-    func finishAdd(_ result: Result<(index: Int, address: String), Error>) {
-        lock.withLock { addResult = result }
-        added.signal()
+    func finishChange(_ result: Result<Value, Error>) {
+        lock.withLock { changeResult = result }
+        changed.signal()
     }
 
     func finishStore(_ error: Error?) {
@@ -1390,26 +1499,115 @@ final class SubaddressStoreJob {
         stored.signal()
     }
 
-    /// The add's result, or nil when the block did not start within
-    /// `timeout`. A block that started finishes its add in a moment.
-    func waitForAdd(timeout: TimeInterval) -> Result<(index: Int, address: String), Error>? {
-        if added.wait(timeout: .now() + timeout) == .timedOut {
+    /// The change's result, or nil when the change did not start within
+    /// `timeout`. A change that started finishes in a moment.
+    func waitForChange(timeout: TimeInterval) -> Result<Value, Error>? {
+        if changed.wait(timeout: .now() + timeout) == .timedOut {
             let abandoned: Bool = lock.withLock {
                 guard phase == .queued else { return false }
                 phase = .abandoned
                 return true
             }
             if abandoned { return nil }
-            added.wait()
+            changed.wait()
         }
-        return lock.withLock { addResult }
+        return lock.withLock { changeResult }
     }
 
     /// `.some(error)` when the store ended within `timeout` (`.some(nil)`:
-    /// stored), nil when it still waits.
+    /// stored), nil when it still runs.
     func waitForStore(timeout: TimeInterval) -> Error?? {
         guard stored.wait(timeout: .now() + timeout) == .success else { return nil }
         return .some(lock.withLock { storeError })
+    }
+}
+
+/// Who runs wallet2's refresh thread. Sync turns it on (the services'
+/// start, `startSync`) and off (`pauseSync`, a stop). A wallet change or a
+/// store holds it off while it runs, and the last hold to end turns it on
+/// again only while sync is on. So a new subaddress, a rename or a store
+/// never starts a refresh, and never calls the node, while sync is paused.
+///
+/// `WalletImpl::startRefresh` wakes the refresh thread at once, and its pass
+/// starts with a daemon call. wallet2 keeps one flag for both owners, so
+/// without the gate each subaddress change ended with a start, also while
+/// sync was paused outside a trusted location.
+final class RefreshGate {
+    private let lock = NSLock()
+    private var syncOn = false
+    private var holds = 0
+    private let startRefresh: (UnsafeMutableRawPointer) -> Void
+    private let pauseRefresh: (UnsafeMutableRawPointer) -> Void
+
+    init(
+        startRefresh: @escaping (UnsafeMutableRawPointer) -> Void = { MONERO_Wallet_startRefresh($0) },
+        pauseRefresh: @escaping (UnsafeMutableRawPointer) -> Void = { MONERO_Wallet_pauseRefresh($0) }
+    ) {
+        self.startRefresh = startRefresh
+        self.pauseRefresh = pauseRefresh
+    }
+
+    var isSyncOn: Bool { lock.withLock { syncOn } }
+
+    /// Sync on: the refresh runs now, or when the last hold ends.
+    func syncStarted(_ wallet: UnsafeMutableRawPointer) {
+        lock.withLock {
+            syncOn = true
+            if holds == 0 { startRefresh(wallet) }
+        }
+    }
+
+    /// Sync off: the refresh stops, and no hold that ends starts it again.
+    func syncPaused(_ wallet: UnsafeMutableRawPointer) {
+        lock.withLock {
+            syncOn = false
+            pauseRefresh(wallet)
+        }
+    }
+
+    /// Keeps the refresh off until `release`. Each hold needs one release.
+    func hold(_ wallet: UnsafeMutableRawPointer) {
+        lock.withLock {
+            holds += 1
+            pauseRefresh(wallet)
+        }
+    }
+
+    func release(_ wallet: UnsafeMutableRawPointer) {
+        lock.withLock {
+            holds -= 1
+            if holds == 0, syncOn { startRefresh(wallet) }
+        }
+    }
+}
+
+/// A sync pause of the kit's caller, and whether the wallet services wait for
+/// its end. The pause and the start run on the kit's lifecycle queue, the
+/// network's return on the state manager's queue.
+final class CallerPause {
+    private let lock = NSLock()
+    private var paused = false
+    private var servicesDeferred = false
+
+    func begin() { lock.withLock { paused = true } }
+
+    /// True, and the services wait for `end`, while paused.
+    func deferServices() -> Bool {
+        lock.withLock {
+            if paused { servicesDeferred = true }
+            return paused
+        }
+    }
+
+    /// The services stopped: they no longer wait for the end of the pause.
+    func servicesStopped() { lock.withLock { servicesDeferred = false } }
+
+    /// Ends the pause. True when the services waited for it.
+    func end() -> Bool {
+        lock.withLock {
+            defer { paused = false; servicesDeferred = false }
+            return servicesDeferred
+        }
     }
 }
 

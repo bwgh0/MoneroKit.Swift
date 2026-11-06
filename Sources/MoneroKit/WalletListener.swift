@@ -74,7 +74,7 @@ class WalletListener {
         self.walletPointer = walletPointer
 
         walletListenerPointer = MONERO_cw_getWalletListener(walletPointer)
-        MONERO_Wallet_startRefresh(walletPointer)
+        // MoneroCore starts wallet2's refresh after this (RefreshGate).
 
         scheduleNextCheck()
     }
